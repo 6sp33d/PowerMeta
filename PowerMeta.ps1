@@ -63,6 +63,9 @@ Function Invoke-PowerMeta{
     .PARAMETER MaxSearchPages
     The maximum number of pages to search on each search engine.
 
+    .PARAMETER SearchEngines
+    The search engines to ask: Bing, DuckDuckGo, or both (the default). Example: -SearchEngines DuckDuckGo
+
     .PARAMETER SearchDelay
     Seconds to wait between two requests to the same search engine. Default 2.
 
@@ -153,6 +156,11 @@ Function Invoke-PowerMeta{
         $MaxSearchPages = 5,
 
         [Parameter(Mandatory = $false)]
+        [ValidateSet('Bing', 'DuckDuckGo')]
+        [string[]]
+        $SearchEngines = @('Bing', 'DuckDuckGo'),
+
+        [Parameter(Mandatory = $false)]
         [int]
         $SearchDelay = 2
 
@@ -178,9 +186,22 @@ Function Invoke-PowerMeta{
                 }
 
             $validlinks = New-Object System.Collections.Generic.List[string]
+            $duckDuckGoBlocked = $false
             foreach ($filetype in $filetypearray)
                 {
-                $found = @(Search-PowerMetaBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay)
+                $found = @()
+
+                if ($SearchEngines -contains 'Bing')
+                    {
+                    $found += @(Search-PowerMetaBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay)
+                    }
+
+                #Once DuckDuckGo has answered with its bot check it is left alone for the rest of the run
+                if ($SearchEngines -contains 'DuckDuckGo' -and -not $duckDuckGoBlocked)
+                    {
+                    $found += @(Search-PowerMetaDuckDuckGo -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay -Blocked ([ref]$duckDuckGoBlocked))
+                    }
+
                 foreach ($link in $found)
                     {
                     if (-not $validlinks.Contains($link)) { $validlinks.Add($link) }
@@ -318,19 +339,23 @@ function Get-PowerMetaHostName {
     $name.Trim('.')
 }
 
-#Fetches a page and returns its text, or nothing if the request failed
+#Fetches a page and returns its text, or nothing if the request failed.
+#With -Method Post the hashtable given as -Body is sent as form fields.
 function Get-PowerMetaWebPage {
     param(
         [string]$Url,
         [string]$UserAgent = "",
         [Microsoft.PowerShell.Commands.WebRequestSession]$Session = $null,
-        [int]$TimeoutSec = 60
+        [int]$TimeoutSec = 60,
+        [string]$Method = 'Get',
+        [hashtable]$Body = $null
     )
 
     $ProgressPreference = 'SilentlyContinue'
-    $request = @{ Uri = $Url; UseBasicParsing = $true; TimeoutSec = $TimeoutSec; ErrorAction = 'Stop' }
+    $request = @{ Uri = $Url; Method = $Method; UseBasicParsing = $true; TimeoutSec = $TimeoutSec; ErrorAction = 'Stop' }
     if ($UserAgent -ne "") { $request['UserAgent'] = $UserAgent }
     if ($null -ne $Session) { $request['WebSession'] = $Session }
+    if ($null -ne $Body) { $request['Body'] = $Body }
 
     try
         {
@@ -364,13 +389,14 @@ function Get-PowerMetaLinksFromHtml {
 }
 
 #Bing wraps each result as https://www.bing.com/ck/a?...&u=a1<base64url of the real address>&ntb=1
-#This returns the real address, the link unchanged if it is not wrapped, or nothing if it cannot be decoded.
+#(two marker characters, then the address). This returns the real address, the link unchanged if it
+#is not wrapped, or nothing if it cannot be decoded into an http(s) address.
 function ConvertFrom-PowerMetaBingLink {
     param([string]$Link)
 
     if ($Link -notmatch '^(?:https?:)?//(?:www\.)?bing\.com/ck/a\?') { return $Link }
 
-    $match = [regex]::Match($Link, '[?&]u=a1([A-Za-z0-9_\-]+)')
+    $match = [regex]::Match($Link, '[?&]u=[A-Za-z0-9]{2}([A-Za-z0-9_\-]+)')
     if (-not $match.Success) { return $null }
 
     $encoded = $match.Groups[1].Value.Replace('-', '+').Replace('_', '/')
@@ -382,12 +408,67 @@ function ConvertFrom-PowerMetaBingLink {
 
     try
         {
-        return [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($encoded))
+        $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($encoded))
         }
     catch
         {
         return $null
         }
+
+    if ($decoded -notmatch '^https?://') { return $null }
+    return $decoded
+}
+
+#DuckDuckGo gives results either as plain addresses or wrapped as //duckduckgo.com/l/?uddg=<url-encoded address>&rut=...
+#This returns the real address, the link unchanged if it is not wrapped, or nothing if it cannot be decoded.
+function ConvertFrom-PowerMetaDuckDuckGoLink {
+    param([string]$Link)
+
+    if ($Link -notmatch '^(?:https?:)?//(?:www\.)?duckduckgo\.com/l/\?') { return $Link }
+
+    $match = [regex]::Match($Link, '[?&]uddg=([^&#]+)')
+    if (-not $match.Success) { return $null }
+
+    $decoded = [System.Uri]::UnescapeDataString($match.Groups[1].Value)
+    if ($decoded -notmatch '^https?://') { return $null }
+    return $decoded
+}
+
+#Returns the fields of the "Next" form on a DuckDuckGo results page as a hashtable, or nothing on the last page.
+#The form carries the query (q), the offset of the next page (s) and the tokens DuckDuckGo wants sent back.
+function Get-PowerMetaDuckDuckGoNextForm {
+    param([string]$Html, [int]$After = 0)
+
+    $best = $null
+    $bestOffset = $After
+    foreach ($form in [regex]::Matches($Html, '<form\b[^>]*>(.*?)</form>', 'IgnoreCase, Singleline'))
+        {
+        $fields = @{}
+        foreach ($field in [regex]::Matches($form.Groups[1].Value, '<input\b[^>]*>', 'IgnoreCase'))
+            {
+            $nameMatch = [regex]::Match($field.Value, '\bname\s*=\s*(?:"([^"]*)"|''([^'']*)'')', 'IgnoreCase')
+            if (-not $nameMatch.Success) { continue }
+            $fieldName = $nameMatch.Groups[1].Value + $nameMatch.Groups[2].Value
+            if ($fieldName -eq '') { continue }
+
+            $fieldValue = ''
+            $valueMatch = [regex]::Match($field.Value, '\bvalue\s*=\s*(?:"([^"]*)"|''([^'']*)'')', 'IgnoreCase')
+            if ($valueMatch.Success)
+                {
+                $fieldValue = [System.Net.WebUtility]::HtmlDecode($valueMatch.Groups[1].Value + $valueMatch.Groups[2].Value)
+                }
+            $fields[$fieldName] = $fieldValue
+            }
+
+        #The "Next" form is the one whose offset lies beyond the page just read ("Previous" points backwards)
+        $offset = 0
+        if ($fields.ContainsKey('q') -and $fields.ContainsKey('s') -and [int]::TryParse([string]$fields['s'], [ref]$offset) -and $offset -gt $bestOffset)
+            {
+            $best = $fields
+            $bestOffset = $offset
+            }
+        }
+    $best
 }
 
 #True if the link is an http(s) address on the domain (or one of its sub-domains)
@@ -471,6 +552,97 @@ function Search-PowerMetaBing {
         {
         Write-Host "[!] Bing returned results, but none of them are on $Domain. Bing sometimes answers automated 'site:' + 'filetype:' queries with unrelated pages. Try again later or from another network."
         }
+    Write-Host "[*] Bing: $($links.Count) $FileType files found"
+
+    $links
+}
+
+#Searches DuckDuckGo's script-free page (html.duckduckgo.com) for "site:domain filetype:type" and returns the matching file links.
+#DuckDuckGo wants the query as a form post, and gives each results page a "Next" form holding what to post for the following page.
+#If it answers with its bot check instead of results, the [ref] passed as -Blocked is set to $true.
+function Search-PowerMetaDuckDuckGo {
+    param(
+        [string]$Domain,
+        [string]$FileType,
+        [string]$UserAgent = "",
+        [int]$MaxPages = 5,
+        [int]$DelaySeconds = 2,
+        [ref]$Blocked
+    )
+
+    $links = New-Object System.Collections.Generic.List[string]
+    $query = "site:$Domain filetype:$FileType"
+    $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $body = @{ q = $query; b = '' }
+    $offset = 0
+    $resultsSeen = 0
+    $onDomainSeen = 0
+
+    Write-Host "[*] Searching DuckDuckGo for '$query'"
+
+    for ($page = 1; $page -le $MaxPages; $page++)
+        {
+        if ($page -gt 1 -and $DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
+
+        Write-Host "[*] Now Analyzing page $page of DuckDuckGo search results"
+        $html = Get-PowerMetaWebPage -Url 'https://html.duckduckgo.com/html/' -Method 'Post' -Body $body -UserAgent $UserAgent -Session $session
+        if (-not $html) { break }
+
+        #Each result title is a link with class "result__a"
+        $results = ([regex]::Matches($html, 'class="result__a"')).Count
+
+        #The bot check ("Unfortunately, bots use DuckDuckGo too") comes instead of results
+        if ($results -eq 0 -and $html -match 'anomaly-modal|challenge-form')
+            {
+            Write-Host "[!] DuckDuckGo answered with its bot check instead of results. It does this to automated requests from some networks; DuckDuckGo is skipped for the rest of this run. Try again later or from another network."
+            if ($null -ne $Blocked) { $Blocked.Value = $true }
+            break
+            }
+
+        $new = 0
+        foreach ($href in @(Get-PowerMetaLinksFromHtml $html))
+            {
+            $link = ConvertFrom-PowerMetaDuckDuckGoLink $href
+            if (-not $link) { continue }
+            if (Test-PowerMetaDomainLink -Link $link -Domain $Domain) { $onDomainSeen++ }
+            if (Test-PowerMetaFileLink -Link $link -Domain $Domain -FileType $FileType)
+                {
+                if (-not $links.Contains($link))
+                    {
+                    $links.Add($link)
+                    $new++
+                    }
+                }
+            }
+
+        $resultsSeen += $results
+
+        #Nothing new: this was the last page
+        if ($new -eq 0) { break }
+
+        $next = Get-PowerMetaDuckDuckGoNextForm -Html $html -After $offset
+        if ($null -ne $next)
+            {
+            $body = $next
+            $offset = [int]$next['s']
+            }
+        elseif ($results -ge 10 -and $html -notmatch 'name\s*=\s*["'']s["'']')
+            {
+            #A full page without a readable "Next" form: use the offsets DuckDuckGo's paging normally uses (10, 25, 40, ...)
+            $offset = 10 + (($page - 1) * 15)
+            $body = @{ q = $query; b = ''; s = [string]$offset }
+            }
+        else
+            {
+            break
+            }
+        }
+
+    if ($resultsSeen -gt 0 -and $onDomainSeen -eq 0)
+        {
+        Write-Host "[!] DuckDuckGo returned results, but none of them are on $Domain."
+        }
+    Write-Host "[*] DuckDuckGo: $($links.Count) $FileType files found"
 
     $links
 }

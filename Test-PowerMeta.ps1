@@ -4,7 +4,8 @@
     metadata extraction on two small PDF files it creates itself (if ExifTool is installed).
 
 .PARAMETER Live
-    Also run one real Bing search, to see what the search engine returns from this computer.
+    Also run one real Bing search and one real DuckDuckGo search, to see what the search engines
+    return from this computer.
 
 .PARAMETER TargetDomain
     The domain to use for the -Live search.
@@ -77,6 +78,23 @@ Assert-Equal 'Bing link needing padding is unwrapped' (ConvertFrom-PowerMetaBing
 Assert-Equal 'A link that is not wrapped is left alone' (ConvertFrom-PowerMetaBingLink 'https://example.com/a/report.pdf') 'https://example.com/a/report.pdf'
 Assert-Equal 'A wrapped link without an address gives nothing' (ConvertFrom-PowerMetaBingLink 'https://www.bing.com/ck/a?!&&p=abc123') ''
 
+Assert-Equal 'Bing link to one of its own pages gives nothing' (ConvertFrom-PowerMetaBingLink 'https://www.bing.com/ck/a?u=a1L2ltYWdlcy9zZWFyY2g_cT14') ''
+
+Assert-Equal 'DuckDuckGo link is unwrapped' (ConvertFrom-PowerMetaDuckDuckGoLink '//duckduckgo.com/l/?uddg=https%3A%2F%2Ffiles.example.com%2Fa%2Fbudget%2D2025.pdf%3Fdl%3D1&rut=0123abcd') 'https://files.example.com/a/budget-2025.pdf?dl=1'
+Assert-Equal 'A plain DuckDuckGo result is left alone' (ConvertFrom-PowerMetaDuckDuckGoLink 'https://www.example.com/docs/Annual%20Report.pdf') 'https://www.example.com/docs/Annual%20Report.pdf'
+
+$ddgPage = '<div class="nav-link"><form action="/html/" method="post"><input type="submit" value="Previous" /><input type="hidden" name="q" value="site:example.com filetype:pdf" /><input type="hidden" name="s" value="0" /></form></div><div class="nav-link"><form action="/html/" method="post"><input type="submit" value="Next" /><input type="hidden" name="q" value="site:example.com filetype:pdf" /><input type="hidden" name="s" value="60" /><input type="hidden" name="vqd" value="4-222&amp;x" /></form></div>'
+$nextForm = Get-PowerMetaDuckDuckGoNextForm -Html $ddgPage -After 30
+$nextOffset = ''
+$nextToken = ''
+if ($nextForm) {
+    $nextOffset = $nextForm['s']
+    $nextToken = $nextForm['vqd']
+}
+Assert-Equal 'DuckDuckGo "Next" form is found' $nextOffset '60'
+Assert-Equal 'Its fields are decoded' $nextToken '4-222&x'
+Assert-Equal 'There is no "Next" form on the last page' (Get-PowerMetaDuckDuckGoNextForm -Html $ddgPage -After 60) ''
+
 Assert-Equal 'Links are read from HTML' ((@(Get-PowerMetaLinksFromHtml '<p><a class="x" href="https://example.com/a.pdf?x=1&amp;y=2">one</a> <A HREF=''/relative''>two</A> <a href=bare.html>three</a></p>')) -join '|') 'https://example.com/a.pdf?x=1&y=2|/relative|bare.html'
 
 Assert-Equal 'File on the domain is accepted' (Test-PowerMetaFileLink -Link 'https://example.com/x/report.pdf' -Domain 'example.com' -FileType 'pdf') $true
@@ -140,11 +158,19 @@ else {
 }
 
 if ($Live) {
-    Write-Host ""
-    Write-Host "Live search (one Bing query for PDF files on $TargetDomain)"
     $liveDomain = Get-PowerMetaHostName $TargetDomain
+
+    Write-Host ""
+    Write-Host "Live search (one Bing query for PDF files on $liveDomain)"
     $links = @(Search-PowerMetaBing -Domain $liveDomain -FileType 'pdf' -MaxPages 1)
     Write-Host "[info] Bing returned $($links.Count) PDF links on $liveDomain"
+    $links | Select-Object -First 5 | ForEach-Object { Write-Host "       $_" }
+
+    Write-Host ""
+    Write-Host "Live search (one DuckDuckGo query for PDF files on $liveDomain)"
+    $ddgBlocked = $false
+    $links = @(Search-PowerMetaDuckDuckGo -Domain $liveDomain -FileType 'pdf' -MaxPages 1 -Blocked ([ref]$ddgBlocked))
+    Write-Host "[info] DuckDuckGo returned $($links.Count) PDF links on $liveDomain (bot check shown: $ddgBlocked)"
     $links | Select-Object -First 5 | ForEach-Object { Write-Host "       $_" }
 }
 
