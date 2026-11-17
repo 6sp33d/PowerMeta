@@ -191,24 +191,24 @@ Function Invoke-PowerMeta{
 
             $validlinks = New-Object System.Collections.Generic.List[string]
 
+            #Links are compared without "http://" or "https://": the Internet Archive often knows a file under
+            #its old http address while a search engine gives today's https one
+            $linkByKey = New-Object System.Collections.Hashtable
+
             #The Internet Archive answers for all file types in a single request
+            $archiveEntries = @()
             if ($SearchEngines -contains 'Archive')
                 {
-                foreach ($entry in @(Search-PowerMetaArchive -Domain $domain -FileTypes $filetypearray -UserAgent $UserAgent))
-                    {
-                    if (-not $validlinks.Contains($entry.Link)) { $validlinks.Add($entry.Link) }
-                    if (-not $archiveCopies.ContainsKey($entry.Link)) { $archiveCopies[$entry.Link] = $entry.ArchiveCopy }
-                    }
+                $archiveEntries = @(Search-PowerMetaArchive -Domain $domain -FileTypes $filetypearray -UserAgent $UserAgent)
                 }
 
-            #The search engines are asked once per file type. One that refuses to answer (a bot check, or
-            #results that ignore the query) is left alone for the rest of the run.
-            $bingBlocked = $false
+            #The search engines are asked once per file type. DuckDuckGo is left alone for the rest of the
+            #run once it has refused to answer.
             $duckDuckGoBlocked = $false
             $firstFileType = $true
             foreach ($filetype in $filetypearray)
                 {
-                $askBing = ($SearchEngines -contains 'Bing' -and -not $bingBlocked)
+                $askBing = ($SearchEngines -contains 'Bing')
                 $askDuckDuckGo = ($SearchEngines -contains 'DuckDuckGo' -and -not $duckDuckGoBlocked)
                 if (-not $askBing -and -not $askDuckDuckGo) { break }
 
@@ -220,7 +220,7 @@ Function Invoke-PowerMeta{
 
                 if ($askBing)
                     {
-                    $found += @(Search-PowerMetaBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay -Blocked ([ref]$bingBlocked))
+                    $found += @(Search-PowerMetaBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay)
                     }
 
                 if ($askDuckDuckGo)
@@ -230,8 +230,27 @@ Function Invoke-PowerMeta{
 
                 foreach ($link in $found)
                     {
-                    if (-not $validlinks.Contains($link)) { $validlinks.Add($link) }
+                    $key = Get-PowerMetaLinkKey $link
+                    if (-not $linkByKey.ContainsKey($key))
+                        {
+                        $linkByKey[$key] = $link
+                        $validlinks.Add($link)
+                        }
                     }
+                }
+
+            #The Archive's files are added last, so that for a file both know the search engine's current
+            #address is the one kept. Either way the Archive's copy is remembered for it.
+            foreach ($entry in $archiveEntries)
+                {
+                $key = Get-PowerMetaLinkKey $entry.Link
+                if (-not $linkByKey.ContainsKey($key))
+                    {
+                    $linkByKey[$key] = $entry.Link
+                    $validlinks.Add($entry.Link)
+                    }
+                $kept = [string]$linkByKey[$key]
+                if (-not $archiveCopies.ContainsKey($kept)) { $archiveCopies[$kept] = $entry.ArchiveCopy }
                 }
 
             $targetlinks = @($validlinks | Sort-Object)
@@ -529,16 +548,14 @@ function Test-PowerMetaFileLink {
     return [regex]::IsMatch($uri.PathAndQuery, $pattern, 'IgnoreCase')
 }
 
-#Searches Bing for "site:domain filetype:type" and returns the matching file links.
-#If Bing answers with results that are not on the domain at all, the [ref] passed as -Blocked is set to $true.
+#Searches Bing for "site:domain filetype:type" and returns the matching file links
 function Search-PowerMetaBing {
     param(
         [string]$Domain,
         [string]$FileType,
         [string]$UserAgent = "",
         [int]$MaxPages = 5,
-        [int]$DelaySeconds = 2,
-        [ref]$Blocked
+        [int]$DelaySeconds = 2
     )
 
     $links = New-Object System.Collections.Generic.List[string]
@@ -583,11 +600,11 @@ function Search-PowerMetaBing {
         $first += $results
         }
 
-    #A "site:" search can only return pages on the site. Results from elsewhere mean Bing is not answering the query.
+    #Bing fills the page with other sites when it has little or nothing on the site for a query, and it has
+    #also been seen doing so for automated queries. The two cases cannot be told apart from one answer.
     if ($resultsSeen -gt 0 -and $onDomainSeen -eq 0)
         {
-        Write-Host "[!] Bing returned results, but none of them are on $Domain. Bing answers automated 'site:' searches from some networks with unrelated pages, so it is skipped for the rest of this run."
-        if ($null -ne $Blocked) { $Blocked.Value = $true }
+        Write-Host "[!] Bing returned results, but none of them are on $Domain. It does this when it has little or nothing on the site for a search, and sometimes for automated searches."
         }
     Write-Host "[*] Bing: $($links.Count) $FileType files found"
 
@@ -693,6 +710,19 @@ function Search-PowerMetaDuckDuckGo {
     $links
 }
 
+#The part of a link that identifies the file: host (and port, when it is not the usual one), path and query.
+#"http://" or "https://" is left out, so the two addresses of one file compare as equal.
+function Get-PowerMetaLinkKey {
+    param([string]$Link)
+
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($Link, [System.UriKind]::Absolute, [ref]$uri)) { return $Link }
+
+    $key = $uri.Host.ToLowerInvariant()
+    if (-not $uri.IsDefaultPort) { $key += ':' + $uri.Port }
+    return ($key + $uri.PathAndQuery)
+}
+
 #Reads the answer of the Internet Archive's index: one "address timestamp" pair per line.
 #Returns one object per file on the domain, with Link (the address on the site) and ArchiveCopy (the Archive's copy of it).
 function ConvertFrom-PowerMetaArchiveIndex {
@@ -734,9 +764,10 @@ function ConvertFrom-PowerMetaArchiveIndex {
     $entries
 }
 
-#Asks the Internet Archive's Wayback Machine index for every address it has captured on the domain and its
-#sub-domains that names a file of a wanted type. The index is a service made to be queried by programs, and
-#one request covers all file types. Files it lists may have been removed from the site since.
+#Asks the Internet Archive's Wayback Machine index for the addresses it has captured on the domain and its
+#sub-domains that name a file of a wanted type (at most -MaxResults of them). The index is a service made to
+#be queried by programs, and one request covers all file types. Files it lists may have been removed from
+#the site since.
 function Search-PowerMetaArchive {
     param(
         [string]$Domain,
@@ -747,10 +778,11 @@ function Search-PowerMetaArchive {
 
     Write-Host "[*] Asking the Internet Archive which files it has seen on $Domain"
 
-    #The index applies the filter, a Java regular expression, to the whole address:
-    #".pdf" (or another wanted type) that is not followed by a letter or digit
+    #The index applies the filter, a Java regular expression, to the whole address. The pattern skips the
+    #host name (a host such as www.doc.gov must not count as a file type) and then looks for ".pdf" (or
+    #another wanted type) that is not followed by a letter or digit.
     $types = (@($FileTypes | ForEach-Object { [regex]::Escape($_) }) -join '|')
-    $filter = 'original:(?i).*\.(' + $types + ')([^a-z0-9].*)?'
+    $filter = 'original:(?i)[a-z]+://[^/?#]+[/?].*\.(' + $types + ')([^a-z0-9].*)?'
     $url = 'https://web.archive.org/cdx/search/cdx?url=' + [System.Uri]::EscapeDataString($Domain) +
         '&matchType=domain&fl=original,timestamp&collapse=urlkey&gzip=false&filter=statuscode:200&filter=' +
         [System.Uri]::EscapeDataString($filter) + '&limit=' + $MaxResults
@@ -764,6 +796,14 @@ function Search-PowerMetaArchive {
 
     $entries = @(ConvertFrom-PowerMetaArchiveIndex -Text $text -Domain $Domain -FileTypes $FileTypes)
     Write-Host "[*] Internet Archive: $($entries.Count) files found"
+
+    #The index stops at the limit without saying so
+    $lineCount = @($text -split "`n" | Where-Object { $_.Trim() -ne '' }).Count
+    if ($lineCount -ge $MaxResults)
+        {
+        Write-Host "[!] The Internet Archive has more than $MaxResults matching addresses for $Domain. Only the first $MaxResults were read, so this list is incomplete."
+        }
+
     $entries
 }
 
@@ -953,7 +993,18 @@ public static class PowerMetaTrustAllCertificates {
                 if ($problem -ne '' -and $null -ne $ArchiveCopies -and $ArchiveCopies.Contains($link))
                     {
                     Write-Output "[*] Not available from the site ($problem). Trying the copy in the Internet Archive."
-                    $problem = [string](Save-PowerMetaFile -Link ([string]$ArchiveCopies[$link]) -Destination $destination -UserAgent $UserAgent -SkipCertificateCheck $isCore)
+                    Start-Sleep -Seconds 1
+
+                    #The Internet Archive has a valid certificate, so for this request it is checked as usual
+                    if ($restoreCallback) { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCallback }
+                    try
+                        {
+                        $problem = [string](Save-PowerMetaFile -Link ([string]$ArchiveCopies[$link]) -Destination $destination -UserAgent $UserAgent -SkipCertificateCheck $false)
+                        }
+                    finally
+                        {
+                        if ($restoreCallback) { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [PowerMetaTrustAllCertificates]::Callback }
+                        }
                     }
 
                 if ($problem -eq '')

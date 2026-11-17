@@ -8,8 +8,8 @@ For many organizations it's common to find publicly available files posted on th
 
 | Search source | State | Notes |
 |---|---|---|
-| Internet Archive | Used by default | Asks the Wayback Machine's index, a service made to be queried by programs, which addresses it has captured on the domain. One request covers all file types. It lists files it has seen at any time, so some may be gone from the site; PowerMeta then downloads the Archive's copy instead. |
-| Bing | Used by default | Bing hides each result behind a redirect link; PowerMeta decodes these. Bing answers automated `site:` searches from many networks with unrelated pages. PowerMeta tells you when none of the results are on the target domain and leaves Bing alone for the rest of the run. |
+| Internet Archive | Used by default | Asks the Wayback Machine's index, a service made to be queried by programs, which addresses it has captured on the domain (up to 10,000). One request covers all file types. It lists files it has seen at any time, so some may be gone from the site; when such a file cannot be downloaded in the same run, PowerMeta fetches the Archive's first copy of it instead. A list saved with `-OutputList` holds only the addresses on the site, so this does not happen with `-TargetFileList`. |
+| Bing | Used by default | Bing hides each result behind a redirect link; PowerMeta decodes these. When Bing has little or nothing on the site for a search it fills the page with other sites, and it has also been seen doing that for automated searches. PowerMeta tells you when none of the results are on the target domain. |
 | DuckDuckGo | Used by default | Uses DuckDuckGo's script-free results page. DuckDuckGo answers scripts from many networks with a bot check or an error instead of results. PowerMeta tells you when that happens and leaves DuckDuckGo alone for the rest of the run. |
 | Google result pages | Not searched | Google no longer gives result pages, or the addresses in them, to automated clients. See [Google](#google). |
 | Google Custom Search JSON API (`PowerMeta-API.ps1`) | Existing customers only, until January 1, 2027 | Google has closed this API to new customers and discontinues it on January 1, 2027. See [Google API](#google-api). |
@@ -33,7 +33,7 @@ On Windows, run `Install-ExifTool` once. It downloads the current official ExifT
 
 By default PowerMeta just extracts the 'Author' and 'Creator' fields as these commonly have usernames saved. However all metadata for files can be extracted by passing PowerMeta the -ExtractAllToCsv flag. The values in that CSV come straight from the target's documents: a spreadsheet program treats a value that starts with `=`, `+`, `-` or `@` as a formula, so be careful when opening it.
 
-Target servers often have expired or self-signed certificates, so certificate errors are ignored while files are downloaded (and only then).
+Target servers often have expired or self-signed certificates, so certificate errors are ignored while files are downloaded from them (and only then). Copies fetched from the Internet Archive are checked as usual.
 
 ## Requirements
 - Windows PowerShell 5.1, or PowerShell 7

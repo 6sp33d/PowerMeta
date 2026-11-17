@@ -102,6 +102,9 @@ $firstCopy = ''
 if ($archiveEntries.Count -gt 0) { $firstCopy = $archiveEntries[0].ArchiveCopy }
 Assert-Equal 'Internet Archive answer: the address of the archived copy is built' $firstCopy 'https://web.archive.org/web/20190102030405id_/http://www.example.com:80/docs/Report.pdf'
 
+Assert-Equal 'The http and https addresses of a file compare as equal' (Get-PowerMetaLinkKey 'http://WWW.Example.com:80/docs/Report.pdf?v=1') (Get-PowerMetaLinkKey 'https://www.example.com/docs/Report.pdf?v=1')
+Assert-Equal 'An unusual port stays part of the comparison' (Get-PowerMetaLinkKey 'https://www.example.com:8443/a.pdf') 'www.example.com:8443/a.pdf'
+
 Assert-Equal 'Links are read from HTML' ((@(Get-PowerMetaLinksFromHtml '<p><a class="x" href="https://example.com/a.pdf?x=1&amp;y=2">one</a> <A HREF=''/relative''>two</A> <a href=bare.html>three</a></p>')) -join '|') 'https://example.com/a.pdf?x=1&y=2|/relative|bare.html'
 
 Assert-Equal 'File on the domain is accepted' (Test-PowerMetaFileLink -Link 'https://example.com/x/report.pdf' -Domain 'example.com' -FileType 'pdf') $true
