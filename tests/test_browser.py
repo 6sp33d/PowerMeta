@@ -132,6 +132,8 @@ class InARealBrowser(unittest.TestCase):
         self.plain_requests_refused = False  # True: Google's links answer programs with a page, not a redirect
         self.bing_site_answer = "site"  # what Bing shows for "site:localhost": "site", "others" or "nothing"
         self.duckduckgo_extras = ""  # more markup for DuckDuckGo's first page
+        self.google_extras = ""  # more markup for Google's result pages
+        self.google_moves = False  # True: Google sends the browser from the search to another address of its own
         self.questions = []
         self.messages = []
         self.sessions = []
@@ -150,7 +152,7 @@ class InARealBrowser(unittest.TestCase):
         )
         return (
             "<html><title>results</title><body>" + SEARCH_BOX + rows + "<a href='/search?q=x&start=10'>Next</a>"
-            "<a href='http://other.example/elsewhere.pdf'>another site</a></body></html>"
+            "<a href='http://other.example/elsewhere.pdf'>another site</a>" + self.google_extras + "</body></html>"
         )
 
     def respond(self, request):
@@ -161,6 +163,8 @@ class InARealBrowser(unittest.TestCase):
                 return (200, CHECK_PAGE)
             if self.check_pending["continue"]:
                 return (200, CONTINUE_PAGE)
+            if self.google_moves and "moved" not in request.query:
+                return (302, "", {"Location": "/search?moved=1&start=%s&q=x" % request.query.get("start", ["0"])[0]})
             if request.query.get("start", ["0"])[0] != "0":
                 return (200, "<html><body>" + SEARCH_BOX + "<a href='/search?q=x&start=0'>Previous</a></body></html>")
             return (200, self.google_page())
@@ -342,6 +346,22 @@ class InARealBrowser(unittest.TestCase):
         # Pages that took over the window were left by going back: the search was not asked again
         self.assertEqual(sum(1 for request in requests if request.path == "/search"), 2)
         self.assertEqual(len(self.lookups(requests)), 7)  # one per result, and the second step of "two-steps"
+
+    def test_a_results_page_whose_address_changes_is_still_the_results_page(self):
+        # A search engine may send the browser to another address for the same search, and its page may
+        # change its own address afterwards. Neither is a reason to think the window has left the results.
+        self.google_moves = True
+        self.google_extras = "<script>history.replaceState({}, '', location.href + '&changed=1');</script>"
+        self.google_links = ["T1", "page", "T2", "direct"]
+        found, requests = self.run_search(["google"], ["pdf", "docx"])
+        target = self.target
+        self.assertEqual(
+            sorted(found), [target + "/files/a-page.pdf", target + "/files/direct.pdf", target + "/files/hidden.pdf", target + "/files/report.docx"]
+        )
+        self.assertEqual(self.questions, [])
+        self.assertEqual(self.lookups(requests), ["T1", "page", "T2"])
+        # Each search page was asked for once (and sent on once); no lookup made the search run again
+        self.assertEqual(sum(1 for request in requests if request.path == "/search"), 8)
 
     def test_a_page_of_the_search_engine_in_the_way_waits_for_the_person(self):
         # The result link shows a page with a button first. Nobody is hurried: the question comes when

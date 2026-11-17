@@ -519,6 +519,10 @@ class Session:
         try:
             results_tab = driver.current_window_handle
             before = set(driver.window_handles)
+            # The results page as it is in the window now: its address (a search engine may have changed
+            # the one that was opened) and the page itself
+            shown = driver.current_url
+            page = driver.find_element("tag name", "html")
             element = driver.execute_script(_FIND_LINK, link)
             if element is None:
                 return _NOT_OPENED
@@ -526,6 +530,14 @@ class Session:
             driver.set_page_load_timeout(LOOKUP_WAIT)
         except self._errors as error:
             return None if self._failed(error) else _NOT_OPENED
+
+        def left_results():
+            """True once the window holds another page than the results."""
+            try:
+                page.is_enabled()
+                return False
+            except self._stale:
+                return True
 
         def open_again():
             try:
@@ -539,11 +551,11 @@ class Session:
                 element.click()
             except self._errors:
                 pass  # covered by something, or the page it leads to is slow: the log says what happened
-            destination = self._watch(link, results_url, open_again)
+            destination = self._watch(link, left_results, open_again)
         except self._errors:
             destination = None
         finally:
-            self._back_to_results(results_tab, before, results_url)
+            self._back_to_results(results_tab, before, results_url, shown, page)
         return destination
 
     def _tab_lookup(self, link):
@@ -573,11 +585,14 @@ class Session:
         except self._errors:
             destination = None
         finally:
-            self._back_to_results(results_tab, before, None)
+            self._back_to_results(results_tab, before)
         return None if destination is _NOT_OPENED else destination
 
-    def _watch(self, link, results_url=None, open_again=None):
+    def _watch(self, link, left_results=None, open_again=None):
         """Wait for the link that was just opened in the current window to show where it leads.
+
+        left_results is given when the link was clicked in the results page: a function that says whether
+        the window has left that page. open_again opens the link once more.
 
         The first address outside the search engine that the window asks for after the link is the one:
         through a redirect, or because the page sent the browser on by itself. Where the site sends the
@@ -588,7 +603,6 @@ class Session:
         """
         driver = self.driver
         start = _page(link)  # the network log leaves the "#..." part out
-        results_page = _page(results_url) if results_url else None
         own_host = _host(link)
         outside = self._outside(link)
         documents = []  # (frame, address) of every page the browser asked for, in order
@@ -631,7 +645,7 @@ class Session:
                 return outside(now)  # the window went on by itself and the log did not show it
 
             # Is the window showing a page of the search engine other than the results?
-            if _host(now) == own_host and _page(now) != results_page:
+            if _host(now) == own_host and (left_results is None or left_results()):
                 check = page_state("google", now, driver.page_source) == "check"
                 if not check:
                     # A notice in between that names the address ("you are being sent to ...")
@@ -686,9 +700,13 @@ class Session:
                 return None
             time.sleep(0.3)
 
-    def _back_to_results(self, results_tab, before, results_url):
+    def _back_to_results(self, results_tab, before, results_url=None, shown=None, page=None):
         """Close every window a lookup opened and put the results page back in the window. Nothing here
-        may get in the way of an error that is already on its way up."""
+        may get in the way of an error that is already on its way up.
+
+        results_url is the search that was opened, shown the address the window gave the results page
+        before the lookup, and page that page itself. Without them the window is left as it is.
+        """
         driver = self.driver
 
         def patiently(action, seconds=3):
@@ -720,8 +738,11 @@ class Session:
                 time.sleep(0.1)
 
         def on_results():
+            # The surest sign is that the page itself is still there; after going back it is its address
+            if patiently(page.is_enabled)[0]:
+                return True
             done, now = patiently(lambda: driver.current_url)
-            return done and _page(now) == _page(results_url)
+            return done and _page(now) == _page(shown)
 
         try:
             driver.switch_to.window(results_tab)
