@@ -64,7 +64,7 @@ Function Invoke-PowerMeta{
     The maximum number of pages to search on each search engine.
 
     .PARAMETER SearchEngines
-    The search engines to ask: Bing, DuckDuckGo, or both (the default). Example: -SearchEngines DuckDuckGo
+    The sources to ask: Bing, DuckDuckGo, Archive (the Internet Archive's index of the addresses it has seen on the domain), or any combination. All three by default. Example: -SearchEngines Archive
 
     .PARAMETER SearchDelay
     Seconds to wait between two requests to the same search engine. Default 2.
@@ -156,9 +156,9 @@ Function Invoke-PowerMeta{
         $MaxSearchPages = 5,
 
         [Parameter(Mandatory = $false)]
-        [ValidateSet('Bing', 'DuckDuckGo')]
+        [ValidateSet('Bing', 'DuckDuckGo', 'Archive')]
         [string[]]
-        $SearchEngines = @('Bing', 'DuckDuckGo'),
+        $SearchEngines = @('Bing', 'DuckDuckGo', 'Archive'),
 
         [Parameter(Mandatory = $false)]
         [int]
@@ -167,6 +167,10 @@ Function Invoke-PowerMeta{
         )
 
     $targetlinks = @()
+
+    #For links found through the Internet Archive: where the Archive keeps its copy of the file.
+    #A plain .NET Hashtable, because its keys are case-sensitive (links can differ only in letter case).
+    $archiveCopies = New-Object System.Collections.Hashtable
 
     #If no target file list was provided we will perform searches and craft one.
     If ($TargetFileList -eq "")
@@ -186,23 +190,40 @@ Function Invoke-PowerMeta{
                 }
 
             $validlinks = New-Object System.Collections.Generic.List[string]
+
+            #The Internet Archive answers for all file types in a single request
+            if ($SearchEngines -contains 'Archive')
+                {
+                foreach ($entry in @(Search-PowerMetaArchive -Domain $domain -FileTypes $filetypearray -UserAgent $UserAgent))
+                    {
+                    if (-not $validlinks.Contains($entry.Link)) { $validlinks.Add($entry.Link) }
+                    if (-not $archiveCopies.ContainsKey($entry.Link)) { $archiveCopies[$entry.Link] = $entry.ArchiveCopy }
+                    }
+                }
+
+            #The search engines are asked once per file type. One that refuses to answer (a bot check, or
+            #results that ignore the query) is left alone for the rest of the run.
+            $bingBlocked = $false
             $duckDuckGoBlocked = $false
             $firstFileType = $true
             foreach ($filetype in $filetypearray)
                 {
+                $askBing = ($SearchEngines -contains 'Bing' -and -not $bingBlocked)
+                $askDuckDuckGo = ($SearchEngines -contains 'DuckDuckGo' -and -not $duckDuckGoBlocked)
+                if (-not $askBing -and -not $askDuckDuckGo) { break }
+
                 #The pause also applies between the last request for one file type and the first for the next
                 if (-not $firstFileType -and $SearchDelay -gt 0) { Start-Sleep -Seconds $SearchDelay }
                 $firstFileType = $false
 
                 $found = @()
 
-                if ($SearchEngines -contains 'Bing')
+                if ($askBing)
                     {
-                    $found += @(Search-PowerMetaBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay)
+                    $found += @(Search-PowerMetaBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay -Blocked ([ref]$bingBlocked))
                     }
 
-                #Once DuckDuckGo has answered with its bot check it is left alone for the rest of the run
-                if ($SearchEngines -contains 'DuckDuckGo' -and -not $duckDuckGoBlocked)
+                if ($askDuckDuckGo)
                     {
                     $found += @(Search-PowerMetaDuckDuckGo -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay -Blocked ([ref]$duckDuckGoBlocked))
                     }
@@ -253,7 +274,7 @@ Function Invoke-PowerMeta{
 
     If ($Download)
     {
-        Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent
+        Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent -ArchiveCopies $archiveCopies
     }
     else
         {
@@ -271,7 +292,7 @@ Function Invoke-PowerMeta{
                 {
                  0 {
                     "[*] Now downloading the files."
-                    Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent
+                    Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent -ArchiveCopies $archiveCopies
                    }
                  1 {"[*] No files will be downloaded."}
                 }
@@ -508,14 +529,16 @@ function Test-PowerMetaFileLink {
     return [regex]::IsMatch($uri.PathAndQuery, $pattern, 'IgnoreCase')
 }
 
-#Searches Bing for "site:domain filetype:type" and returns the matching file links
+#Searches Bing for "site:domain filetype:type" and returns the matching file links.
+#If Bing answers with results that are not on the domain at all, the [ref] passed as -Blocked is set to $true.
 function Search-PowerMetaBing {
     param(
         [string]$Domain,
         [string]$FileType,
         [string]$UserAgent = "",
         [int]$MaxPages = 5,
-        [int]$DelaySeconds = 2
+        [int]$DelaySeconds = 2,
+        [ref]$Blocked
     )
 
     $links = New-Object System.Collections.Generic.List[string]
@@ -560,9 +583,11 @@ function Search-PowerMetaBing {
         $first += $results
         }
 
+    #A "site:" search can only return pages on the site. Results from elsewhere mean Bing is not answering the query.
     if ($resultsSeen -gt 0 -and $onDomainSeen -eq 0)
         {
-        Write-Host "[!] Bing returned results, but none of them are on $Domain. Bing sometimes answers automated 'site:' + 'filetype:' queries with unrelated pages. Try again later or from another network."
+        Write-Host "[!] Bing returned results, but none of them are on $Domain. Bing answers automated 'site:' searches from some networks with unrelated pages, so it is skipped for the rest of this run."
+        if ($null -ne $Blocked) { $Blocked.Value = $true }
         }
     Write-Host "[*] Bing: $($links.Count) $FileType files found"
 
@@ -668,6 +693,80 @@ function Search-PowerMetaDuckDuckGo {
     $links
 }
 
+#Reads the answer of the Internet Archive's index: one "address timestamp" pair per line.
+#Returns one object per file on the domain, with Link (the address on the site) and ArchiveCopy (the Archive's copy of it).
+function ConvertFrom-PowerMetaArchiveIndex {
+    param([string]$Text, [string]$Domain, [string[]]$FileTypes)
+
+    $entries = New-Object System.Collections.Generic.List[object]
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    if (-not $Text) { return }
+
+    foreach ($line in ($Text -split "`n"))
+        {
+        $parts = @($line.Trim() -split '\s+')
+        if ($parts.Count -ne 2) { continue }
+        $original = $parts[0]
+        $timestamp = $parts[1]
+        if ($timestamp -notmatch '^\d{14}$') { continue }
+
+        #Captured addresses often carry the default port (http://example.com:80/a.pdf); AbsoluteUri drops it
+        $uri = $null
+        if (-not [System.Uri]::TryCreate($original, [System.UriKind]::Absolute, [ref]$uri)) { continue }
+        $link = $uri.AbsoluteUri
+
+        $wanted = $false
+        foreach ($type in $FileTypes)
+            {
+            if (Test-PowerMetaFileLink -Link $link -Domain $Domain -FileType $type)
+                {
+                $wanted = $true
+                break
+                }
+            }
+        if (-not $wanted) { continue }
+
+        if ($seen.Add($link))
+            {
+            $entries.Add((New-Object PSObject -Property @{ Link = $link; ArchiveCopy = ('https://web.archive.org/web/' + $timestamp + 'id_/' + $original) }))
+            }
+        }
+    $entries
+}
+
+#Asks the Internet Archive's Wayback Machine index for every address it has captured on the domain and its
+#sub-domains that names a file of a wanted type. The index is a service made to be queried by programs, and
+#one request covers all file types. Files it lists may have been removed from the site since.
+function Search-PowerMetaArchive {
+    param(
+        [string]$Domain,
+        [string[]]$FileTypes,
+        [string]$UserAgent = "",
+        [int]$MaxResults = 10000
+    )
+
+    Write-Host "[*] Asking the Internet Archive which files it has seen on $Domain"
+
+    #The index applies the filter, a Java regular expression, to the whole address:
+    #".pdf" (or another wanted type) that is not followed by a letter or digit
+    $types = (@($FileTypes | ForEach-Object { [regex]::Escape($_) }) -join '|')
+    $filter = 'original:(?i).*\.(' + $types + ')([^a-z0-9].*)?'
+    $url = 'https://web.archive.org/cdx/search/cdx?url=' + [System.Uri]::EscapeDataString($Domain) +
+        '&matchType=domain&fl=original,timestamp&collapse=urlkey&gzip=false&filter=statuscode:200&filter=' +
+        [System.Uri]::EscapeDataString($filter) + '&limit=' + $MaxResults
+
+    $text = Get-PowerMetaWebPage -Url $url -UserAgent $UserAgent -TimeoutSec 180
+    if ($null -eq $text)
+        {
+        Write-Host "[!] The Internet Archive did not answer. Its index is sometimes slow or busy; try again later."
+        return
+        }
+
+    $entries = @(ConvertFrom-PowerMetaArchiveIndex -Text $text -Domain $Domain -FileTypes $FileTypes)
+    Write-Host "[*] Internet Archive: $($entries.Count) files found"
+    $entries
+}
+
 #Turns the last part of a link into a file name that is safe on Windows and in PowerShell
 function Get-PowerMetaFileName {
     param([string]$Link)
@@ -700,6 +799,44 @@ function Get-PowerMetaFileName {
     $name
 }
 
+#Downloads one address to a file. Returns an empty string when it worked, otherwise the reason it failed.
+function Save-PowerMetaFile {
+    param(
+        [string]$Link,
+        [string]$Destination,
+        [string]$UserAgent = "",
+        [bool]$SkipCertificateCheck = $false
+    )
+
+    # The progress bar makes Invoke-WebRequest very slow in Windows PowerShell
+    $ProgressPreference = 'SilentlyContinue'
+
+    #Windows PowerShell reads -OutFile as a wildcard pattern, so an output folder with [ or ] in its
+    #path would make every download fail. Such files are fetched to a temporary name and then moved.
+    $target = $Destination
+    $viaTemp = [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($Destination)
+    if ($viaTemp) { $target = Join-Path ([System.IO.Path]::GetTempPath()) ('powermeta-' + [System.Guid]::NewGuid().ToString('N') + '.tmp') }
+
+    $request = @{ Uri = $Link; UseBasicParsing = $true; OutFile = $target; TimeoutSec = 300; ErrorAction = 'Stop' }
+    if ($UserAgent -ne "") { $request['UserAgent'] = $UserAgent }
+    if ($SkipCertificateCheck) { $request['SkipCertificateCheck'] = $true }
+
+    try
+        {
+        Invoke-WebRequest @request
+        if ($viaTemp) { [System.IO.File]::Move($target, $Destination) }
+        return ''
+        }
+    catch
+        {
+        $reason = [string]$_.Exception.Message
+        if ($viaTemp -and (Test-Path -LiteralPath $target)) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue }
+        if ($reason -eq '') { $reason = 'the download failed' }
+        return $reason
+        }
+}
+
 #Function to download files from a webserver
 Function Get-TargetFiles{
         Param(
@@ -714,7 +851,13 @@ Function Get-TargetFiles{
 
         [Parameter(Position = 2, Mandatory = $false)]
         [string]
-        $UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+        $UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+
+        #Optional: for links found through the Internet Archive, where the Archive keeps its copy.
+        #It is used when a file can no longer be downloaded from the site itself.
+        [Parameter(Mandatory = $false)]
+        [System.Collections.IDictionary]
+        $ArchiveCopies = $null
 
         )
 
@@ -803,28 +946,24 @@ public static class PowerMetaTrustAllCertificates {
                     }
                 $destination = Join-Path $OutputPath $candidate
 
-                #Windows PowerShell reads -OutFile as a wildcard pattern, so an output folder with [ or ] in its
-                #path would make every download fail. Such files are fetched to a temporary name and then moved.
-                $target = $destination
-                $viaTemp = [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($destination)
-                if ($viaTemp) { $target = Join-Path ([System.IO.Path]::GetTempPath()) ('powermeta-' + [System.Guid]::NewGuid().ToString('N') + '.tmp') }
-
-                $request = @{ Uri = $link; UserAgent = $UserAgent; UseBasicParsing = $true; OutFile = $target; TimeoutSec = 300; ErrorAction = 'Stop' }
-                if ($isCore) { $request['SkipCertificateCheck'] = $true }
-
                 Write-Output "Now Downloading $link"
-                try
+                $problem = [string](Save-PowerMetaFile -Link $link -Destination $destination -UserAgent $UserAgent -SkipCertificateCheck $isCore)
+
+                #A file that is gone from the site may still be in the Internet Archive
+                if ($problem -ne '' -and $null -ne $ArchiveCopies -and $ArchiveCopies.Contains($link))
                     {
-                    Invoke-WebRequest @request
-                    if ($viaTemp) { [System.IO.File]::Move($target, $destination) }
+                    Write-Output "[*] Not available from the site ($problem). Trying the copy in the Internet Archive."
+                    $problem = [string](Save-PowerMetaFile -Link ([string]$ArchiveCopies[$link]) -Destination $destination -UserAgent $UserAgent -SkipCertificateCheck $isCore)
+                    }
+
+                if ($problem -eq '')
+                    {
                     $downloaded++
                     }
-                catch
+                else
                     {
-                    Write-Output "[!] Could not download $link : $($_.Exception.Message)"
+                    Write-Output "[!] Could not download $link : $problem"
                     $failed++
-                    if ($viaTemp -and (Test-Path -LiteralPath $target)) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
-                    if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue }
                     }
                 }
             }

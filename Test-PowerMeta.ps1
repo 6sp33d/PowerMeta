@@ -4,8 +4,8 @@
     metadata extraction on two small PDF files it creates itself (if ExifTool is installed).
 
 .PARAMETER Live
-    Also run one real Bing search and one real DuckDuckGo search, to see what the search engines
-    return from this computer.
+    Also run one real Bing search, one real DuckDuckGo search and one real Internet Archive lookup,
+    to see what each of them returns from this computer.
 
 .PARAMETER TargetDomain
     The domain to use for the -Live search.
@@ -95,6 +95,13 @@ Assert-Equal 'DuckDuckGo "Next" form is found' $nextOffset '60'
 Assert-Equal 'Its fields are decoded' $nextToken '4-222&x'
 Assert-Equal 'There is no "Next" form on the last page' (Get-PowerMetaDuckDuckGoNextForm -Html $ddgPage -After 60) ''
 
+$archiveAnswer = "http://www.example.com:80/docs/Report.pdf 20190102030405`nhttps://files.example.com/a/budget.xlsx?v=2 20210607080910`nhttps://www.example.com/about.html 20200101000000`nhttps://www.example.com/docs/Report.pdf 20220102030405`nhttps://other.org/x.pdf 20200101000000`nnot an index line`n"
+$archiveEntries = @(ConvertFrom-PowerMetaArchiveIndex -Text $archiveAnswer -Domain 'example.com' -FileTypes @('pdf', 'xlsx'))
+Assert-Equal 'Internet Archive answer: files on the domain are kept, the rest dropped' (($archiveEntries | ForEach-Object { $_.Link }) -join '|') 'http://www.example.com/docs/Report.pdf|https://files.example.com/a/budget.xlsx?v=2|https://www.example.com/docs/Report.pdf'
+$firstCopy = ''
+if ($archiveEntries.Count -gt 0) { $firstCopy = $archiveEntries[0].ArchiveCopy }
+Assert-Equal 'Internet Archive answer: the address of the archived copy is built' $firstCopy 'https://web.archive.org/web/20190102030405id_/http://www.example.com:80/docs/Report.pdf'
+
 Assert-Equal 'Links are read from HTML' ((@(Get-PowerMetaLinksFromHtml '<p><a class="x" href="https://example.com/a.pdf?x=1&amp;y=2">one</a> <A HREF=''/relative''>two</A> <a href=bare.html>three</a></p>')) -join '|') 'https://example.com/a.pdf?x=1&y=2|/relative|bare.html'
 
 Assert-Equal 'File on the domain is accepted' (Test-PowerMetaFileLink -Link 'https://example.com/x/report.pdf' -Domain 'example.com' -FileType 'pdf') $true
@@ -177,6 +184,12 @@ if ($Live) {
     $links = @(Search-PowerMetaDuckDuckGo -Domain $liveDomain -FileType 'pdf' -UserAgent $liveAgent -MaxPages 1 -Blocked ([ref]$ddgBlocked))
     Write-Host "[info] DuckDuckGo returned $($links.Count) PDF links on $liveDomain (bot check shown: $ddgBlocked)"
     $links | Select-Object -First 5 | ForEach-Object { Write-Host "       $_" }
+
+    Write-Host ""
+    Write-Host "Live lookup (the Internet Archive's index, all default file types on $liveDomain)"
+    $entries = @(Search-PowerMetaArchive -Domain $liveDomain -FileTypes @('pdf', 'docx', 'xlsx', 'doc', 'xls', 'pptx', 'ppt') -UserAgent $liveAgent)
+    Write-Host "[info] The Internet Archive listed $($entries.Count) files on $liveDomain"
+    $entries | Select-Object -First 5 | ForEach-Object { Write-Host "       $($_.Link)" }
 }
 
 Write-Host ""

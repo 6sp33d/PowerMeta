@@ -8,8 +8,9 @@ For many organizations it's common to find publicly available files posted on th
 
 | Search source | State | Notes |
 |---|---|---|
-| Bing | Used by default | Bing hides each result behind a redirect link; PowerMeta decodes these. Bing sometimes answers automated `site:` + `filetype:` queries with unrelated pages. PowerMeta tells you when none of the results are on the target domain. |
-| DuckDuckGo | Used by default | Uses DuckDuckGo's script-free results page. DuckDuckGo shows some networks a bot check instead of results. PowerMeta tells you when that happens and leaves DuckDuckGo alone for the rest of the run. |
+| Internet Archive | Used by default | Asks the Wayback Machine's index, a service made to be queried by programs, which addresses it has captured on the domain. One request covers all file types. It lists files it has seen at any time, so some may be gone from the site; PowerMeta then downloads the Archive's copy instead. |
+| Bing | Used by default | Bing hides each result behind a redirect link; PowerMeta decodes these. Bing answers automated `site:` searches from many networks with unrelated pages. PowerMeta tells you when none of the results are on the target domain and leaves Bing alone for the rest of the run. |
+| DuckDuckGo | Used by default | Uses DuckDuckGo's script-free results page. DuckDuckGo answers scripts from many networks with a bot check or an error instead of results. PowerMeta tells you when that happens and leaves DuckDuckGo alone for the rest of the run. |
 | Google result pages | Not searched | Google no longer gives result pages, or the addresses in them, to automated clients. See [Google](#google). |
 | Google Custom Search JSON API (`PowerMeta-API.ps1`) | Existing customers only, until January 1, 2027 | Google has closed this API to new customers and discontinues it on January 1, 2027. See [Google API](#google-api). |
 
@@ -49,7 +50,7 @@ PS C:\> Install-ExifTool
 `Install-ExifTool` is only needed once.
 
 ### Basic Search
-This command will search Bing and DuckDuckGo for files on the 'targetdomain.com' domain ending with a file extension of pdf, docx, xlsx, doc, xls, pptx, or ppt. Once it has finished crafting this list it will prompt the user asking if they wish to download the files from the target domain. After downloading files it will prompt again for extraction of metadata from those files.
+This command will ask the Internet Archive, Bing and DuckDuckGo for files on the 'targetdomain.com' domain ending with a file extension of pdf, docx, xlsx, doc, xls, pptx, or ppt. Once it has finished crafting this list it will prompt the user asking if they wish to download the files from the target domain. After downloading files it will prompt again for extraction of metadata from those files.
 ``` PowerShell
 PS C:\> Invoke-PowerMeta -TargetDomain targetdomain.com
 ```
@@ -58,10 +59,10 @@ This command will search for files on the 'targetdomain.com' domain ending with 
 ``` PowerShell
 PS C:\> Invoke-PowerMeta -TargetDomain targetdomain.com -FileTypes "pdf, xml" -Download -Extract
 ```
-### Choosing Search Engines
-This command will only ask DuckDuckGo.
+### Choosing Sources
+This command will only ask the Internet Archive.
 ``` PowerShell
-PS C:\> Invoke-PowerMeta -TargetDomain targetdomain.com -SearchEngines DuckDuckGo
+PS C:\> Invoke-PowerMeta -TargetDomain targetdomain.com -SearchEngines Archive
 ```
 ### Saving The Links That Were Found
 This command will search for files on the 'targetdomain.com' domain and write the links of the files found to disk in a file called "target-domain-links.txt".
@@ -119,7 +120,7 @@ The API returns at most 100 results per file type, and the free tier allows 100 
 ``` PowerShell
 PS C:\> .\Test-PowerMeta.ps1
 ```
-Add `-Live` to also run one real Bing search and one real DuckDuckGo search, which shows what the search engines return from your computer.
+Add `-Live` to also run one real Bing search, one real DuckDuckGo search and one real Internet Archive lookup, which shows what each of them returns from your computer.
 ``` PowerShell
 PS C:\> .\Test-PowerMeta.ps1 -Live -TargetDomain targetdomain.com
 ```
@@ -136,6 +137,6 @@ Extract             - Instead of being prompted interactively pass this flag to 
 ExtractAllToCsv     - All metadata (not just the default fields) will be extracted from files to a CSV specified with this flag.
 UserAgent           - Change the default User Agent used by PowerMeta.
 MaxSearchPages      - The maximum number of pages to search on each search engine.
-SearchEngines       - The search engines to ask: Bing, DuckDuckGo, or both (the default).
+SearchEngines       - The sources to ask: Bing, DuckDuckGo, Archive (the Internet Archive), or any combination. All three by default.
 SearchDelay         - Seconds to wait between two requests to the same search engine. Default 2.
 ```
