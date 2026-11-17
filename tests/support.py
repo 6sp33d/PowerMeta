@@ -8,6 +8,7 @@ import base64
 import contextlib
 import http.server
 import os
+import socket
 import threading
 import urllib.parse
 
@@ -20,11 +21,12 @@ def fixture(name):
 
 
 class Request:
-    def __init__(self, method, path, query, form):
+    def __init__(self, method, path, query, form, headers=None):
         self.method = method
         self.path = path
         self.query = query  # {name: [values]}
         self.form = form  # {name: value} for a form post
+        self.headers = headers or {}  # {name: value}
 
 
 class LocalServer:
@@ -48,20 +50,25 @@ class LocalServer:
                     length = int(self.headers.get("Content-Length") or 0)
                     posted = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
                     form = {name: values[0] for name, values in posted.items()}
-                request = Request(method, parts.path, urllib.parse.parse_qs(parts.query, keep_blank_values=True), form)
+                request = Request(
+                    method, parts.path, urllib.parse.parse_qs(parts.query, keep_blank_values=True), form, dict(self.headers.items())
+                )
                 outer.requests.append(request)
                 answer = respond(request)
                 status, body = answer[0], answer[1]
-                headers = answer[2] if len(answer) > 2 else {}
+                headers = dict(answer[2]) if len(answer) > 2 else {}
                 if isinstance(body, str):
                     body = body.encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", headers.pop("Content-Type", "text/html; charset=utf-8"))
-                self.send_header("Content-Length", str(len(body)))
-                for name, value in headers.items():
-                    self.send_header(name, value)
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", headers.pop("Content-Type", "text/html; charset=utf-8"))
+                    self.send_header("Content-Length", str(len(body)))
+                    for name, value in headers.items():
+                        self.send_header(name, value)
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the client did not wait for the answer
 
             def do_GET(self):
                 self._serve("GET")
@@ -82,6 +89,59 @@ class LocalServer:
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=5)
+
+
+class RawServer:
+    """Sends exactly the bytes the given function returns for a request path, then closes the connection.
+    For answers a well-behaved web server would never give. If the function returns an iterable of byte
+    strings instead, they are sent one after the other until the client hangs up."""
+
+    def __init__(self, respond):
+        self._respond = respond
+        self._socket = socket.socket()
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._socket.bind(("127.0.0.1", 0))
+        self._socket.listen(20)
+        self.port = self._socket.getsockname()[1]
+        self.url = "http://127.0.0.1:%d" % self.port
+        self.paths = []
+
+    def _accept(self):
+        while True:
+            try:
+                connection, _ = self._socket.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(connection,), daemon=True).start()
+
+    def _serve(self, connection):
+        try:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                block = connection.recv(65536)
+                if not block:
+                    break
+                data += block
+            path = data.split(b" ")[1].decode("latin-1") if data.count(b" ") > 1 else ""
+            self.paths.append(path)
+            answer = self._respond(path)
+            for part in [answer] if isinstance(answer, bytes) else answer:
+                connection.sendall(part)
+        except OSError:
+            pass
+        finally:
+            connection.close()
+
+    def __enter__(self):
+        threading.Thread(target=self._accept, daemon=True).start()
+        return self
+
+    def __exit__(self, *exc):
+        self._socket.close()
+
+
+def raw_answer(body, extra_headers=b"", status=b"200 OK"):
+    return b"HTTP/1.1 " + status + b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\n" + extra_headers + b"\r\n" + body
 
 
 @contextlib.contextmanager

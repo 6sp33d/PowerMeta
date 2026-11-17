@@ -3,7 +3,7 @@ import unittest
 from powermeta import links, sources
 from powermeta.web import Fetcher
 
-from .support import LocalServer, bing_page, duckduckgo_page, fixture, patched
+from .support import LocalServer, RawServer, bing_page, duckduckgo_page, fixture, patched, raw_answer
 
 
 class Messages(list):
@@ -92,6 +92,19 @@ class DuckDuckGo(unittest.TestCase):
         self.assertEqual((found, blocked), ([], True))
         self.assertIn("HTTP 403", log.text())
 
+    def test_a_later_page_that_fails_is_reported_and_the_results_are_kept(self):
+        def respond(request):
+            if request.form.get("s") == "30":
+                return (403, "Forbidden")
+            return (200, duckduckgo_page(["https://example.com/a.pdf"], next_offset=30))
+
+        with LocalServer(respond) as server:
+            with patched(sources, DUCKDUCKGO_URL=server.url + "/html/"):
+                log = Messages()
+                found, blocked = sources.search_duckduckgo(Fetcher(), "example.com", "pdf", delay=0, log=log)
+        self.assertEqual((found, blocked), (["https://example.com/a.pdf"], False))
+        self.assertIn("did not answer for page 2 (HTTP 403 Forbidden)", log.text())
+
     def test_no_results_is_not_a_block(self):
         with LocalServer(lambda request: (200, duckduckgo_page([]))) as server:
             with patched(sources, DUCKDUCKGO_URL=server.url + "/html/"):
@@ -146,6 +159,37 @@ class Archive(unittest.TestCase):
                 log = Messages()
                 self.assertEqual(sources.search_archive(Fetcher(), "example.com", ["pdf"], log=log), [])
         self.assertIn("did not answer", log.text())
+
+    def test_an_answer_that_is_cut_off_or_not_http_is_reported_not_raised(self):
+        answers = {
+            "/cut": b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\nhttp://example.com/a.pdf 2020",
+            "/chunk": b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1000\r\nhttp://example.com/a.pdf",
+            "/garbage": b"NOT HTTP AT ALL\r\n\r\n",
+            "/header": b"HTTP/1.1 200 OK\r\nX: " + b"a" * 70000 + b"\r\n\r\n",
+            "/gzip": raw_answer(b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03" + b"\xff" * 30, b"Content-Encoding: gzip\r\n"),
+        }
+        with RawServer(lambda path: answers[path.split("?")[0]]) as server:
+            for path in answers:
+                with patched(sources, ARCHIVE_INDEX_URL=server.url + path):
+                    log = Messages()
+                    self.assertEqual(sources.search_archive(Fetcher(timeout=10), "example.com", ["pdf"], log=log), [], path)
+                self.assertIn("did not answer", log.text(), path)
+
+    def test_gzip_answers_are_unpacked_within_a_limit(self):
+        import gzip
+
+        from powermeta import web
+
+        packed = gzip.compress(b"http://example.com/a.pdf 20200101000000\n")
+        with RawServer(lambda path: raw_answer(packed, b"Content-Encoding: gzip\r\n")) as server:
+            self.assertEqual(Fetcher().get(server.url + "/x").text, "http://example.com/a.pdf 20200101000000\n")
+            with patched(web, MAX_PAGE_BYTES=20), self.assertRaises(web.FetchError):
+                Fetcher().get(server.url + "/x")
+        bomb = gzip.compress(b"\0" * (2 * 1024 * 1024))
+        with RawServer(lambda path: raw_answer(bomb, b"Content-Encoding: gzip\r\n")) as server:
+            with patched(web, MAX_PAGE_BYTES=1024 * 1024), self.assertRaises(web.FetchError) as raised:
+                Fetcher().get(server.url + "/x")
+        self.assertIn("unpacks to more than", str(raised.exception))
 
 
 if __name__ == "__main__":

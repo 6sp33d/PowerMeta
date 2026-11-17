@@ -12,6 +12,7 @@ import html
 import os
 import re
 from collections import namedtuple
+from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 DEFAULT_FILE_TYPES = ["pdf", "docx", "xlsx", "doc", "xls", "pptx", "ppt"]
@@ -27,7 +28,8 @@ _HREF = re.compile(r"""<a\s[^>]*?href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"""
 _FILE_TYPE = re.compile(r"[a-z0-9]{1,12}")
 _HOST = re.compile(r"[^\W_]([^\W_]|[.\-])*[^\W_]|[^\W_]")
 _NAME_UNSAFE = re.compile(r"[^A-Za-z0-9._%+=@,~() \-]")
-_NAME_RESERVED = re.compile(r"(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)", re.I)
+# Windows device names, also when spaces come before the dot ("nul .pdf")
+_NAME_RESERVED = re.compile(r"(con|prn|aux|nul|com[0-9]|lpt[0-9]) *(\.|$)", re.I)
 _NAME_DEFUSE = re.compile(r"([.\-]|exiftool)", re.I)
 _FORM = re.compile(r"<form\b[^>]*>(.*?)</form>", re.I | re.S)
 _INPUT = re.compile(r"<input\b[^>]*>", re.I)
@@ -61,14 +63,75 @@ def is_valid_host(host):
     return bool(host) and _HOST.fullmatch(host) is not None
 
 
+class _PageReader(HTMLParser):
+    """Collects the address of every link in a page, and the fields of every form."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links = []
+        self.forms = []
+        self._form = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            for name, value in attrs:
+                if name == "href":
+                    if value:
+                        self.links.append(value)
+                    break
+        elif tag == "form":
+            self._form = {}
+            self.forms.append(self._form)
+        elif tag == "input" and self._form is not None:
+            fields = dict(reversed(attrs))  # the first of two attributes with one name counts
+            if fields.get("name"):
+                self._form[fields["name"]] = fields.get("value") or ""
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self._form = None
+
+
+def _read_page(page):
+    """The links and forms of a page, or None if the page cannot be read as HTML."""
+    reader = _PageReader()
+    try:
+        reader.feed(page or "")
+        reader.close()
+    except Exception:  # before Python 3.10 the parser gives up on some malformed markup
+        return None
+    return reader
+
+
 def links_from_html(page):
     """The href of every link in a page, with HTML entities such as &amp; decoded."""
+    reader = _read_page(page)
+    if reader is not None:
+        return reader.links
     links = []
     for double, single, bare in _HREF.findall(page or ""):
         value = double or single or bare
         if value:
             links.append(html.unescape(value))
     return links
+
+
+def _forms_from_html(page):
+    """The fields of every form in a page: a list of {name: value}."""
+    reader = _read_page(page)
+    if reader is not None:
+        return reader.forms
+    forms = []
+    for body in _FORM.findall(page or ""):
+        fields = {}
+        for tag in _INPUT.findall(body):
+            name = _FIELD_NAME.search(tag)
+            field = (name.group(1) or name.group(2) or "") if name else ""
+            if field:
+                value = _FIELD_VALUE.search(tag)
+                fields[field] = html.unescape((value.group(1) or value.group(2) or "") if value else "")
+        forms.append(fields)
+    return forms
 
 
 def _split(link):
@@ -153,16 +216,22 @@ def is_on_domain(link, domain):
     return host == domain or host.endswith("." + domain)
 
 
-def is_wanted_file(link, domain, file_type):
-    """True if the link is on the domain and names a file of the wanted type.
+def _path_and_query(parts):
+    return (parts.path or "/") + ("?" + parts.query if parts.query else "")
 
-    ".doc" must not be followed by another letter or digit, so a search for doc does not pick up docx.
-    """
+
+def _names_type(text, file_type):
+    """True if the text holds ".pdf" (or another type) that is not followed by a letter or digit, so that
+    a search for doc does not pick up docx."""
+    return re.search(r"\." + re.escape(file_type) + r"(?![A-Za-z0-9])", text, re.I) is not None
+
+
+def is_wanted_file(link, domain, file_type):
+    """True if the link is on the domain and names a file of the wanted type, in its path or its query
+    (https://example.com/get.php?file=report.pdf)."""
     if not is_on_domain(link, domain):
         return False
-    parts = urlsplit(link)
-    path_and_query = (parts.path or "/") + ("?" + parts.query if parts.query else "")
-    return re.search(r"\." + re.escape(file_type) + r"(?![A-Za-z0-9])", path_and_query, re.I) is not None
+    return _names_type(_path_and_query(urlsplit(link)), file_type)
 
 
 def wanted_type(link, domain, file_types):
@@ -203,14 +272,30 @@ def normalise(link):
     return parts.scheme + "://" + link_key(link)
 
 
-def safe_file_name(link):
-    """Turn the last part of a link into a file name that is safe on Windows and for command lines."""
+def safe_file_name(link, file_types=DEFAULT_FILE_TYPES):
+    """Turn the last part of a link into a file name that is safe on Windows and for command lines.
+
+    A name with an ending always ends in one of the wanted file types. The site must not be able to choose
+    another one: a download saved as argparse.py or setup.exe could be run by mistake, or be picked up by
+    a program that is started in the folder. So get.php?file=report.pdf is saved as get.php.pdf, and a
+    link that names no wanted type gets ".download" added.
+    """
     parts = _split(link)
     path = parts.path if parts is not None else ""
     name = path.rsplit("/", 1)[-1]
 
     # Keep letters, digits and a few harmless symbols; everything else becomes "_"
     name = _NAME_UNSAFE.sub("_", name).strip().rstrip(". ")
+
+    ending = name.rsplit(".", 1)[1].lower() if "." in name else ""
+    if ending not in file_types:
+        named = None
+        if parts is not None:
+            named = next((t for t in file_types if _names_type(_path_and_query(parts), t)), None)
+        if named:
+            name = (name or "download") + "." + named
+        elif "." in name:
+            name += ".download"
 
     if len(name) > 150:
         extension = os.path.splitext(name)[1]
@@ -248,22 +333,17 @@ def duckduckgo_next_form(page, after=0):
     """The fields of the "Next" form on a DuckDuckGo results page, or None on the last page.
 
     The form carries the query (q), the offset of the next page (s) and the tokens DuckDuckGo wants back.
-    The "Next" form is the one whose offset lies beyond the page just read ("Previous" points backwards).
+    The "Next" form is the one whose offset lies just beyond the page that was read ("Previous" points
+    backwards).
     """
-    best, best_offset = None, after
-    for body in _FORM.findall(page or ""):
-        fields = {}
-        for tag in _INPUT.findall(body):
-            name = _FIELD_NAME.search(tag)
-            if not name:
-                continue
-            field = name.group(1) or name.group(2) or ""
-            if not field:
-                continue
-            value = _FIELD_VALUE.search(tag)
-            fields[field] = html.unescape((value.group(1) or value.group(2) or "") if value else "")
-        if "q" in fields and re.fullmatch(r"\d+", fields.get("s", "")) and int(fields["s"]) > best_offset:
-            best, best_offset = fields, int(fields["s"])
+    best, best_offset = None, None
+    for fields in _forms_from_html(page):
+        if "q" not in fields or not re.fullmatch(r"[0-9]{1,9}", fields.get("s", "")):
+            continue
+        offset = int(fields["s"])
+        # The nearest offset beyond this page: no other form on the page can take the place of "Next"
+        if offset > after and (best is None or offset < best_offset):
+            best, best_offset = fields, offset
     return best
 
 
@@ -289,6 +369,8 @@ def parse_archive_index(text, domain, file_types):
         original, timestamp = parts
         if not re.fullmatch(r"\d{14}", timestamp):
             continue
+        # An address in the index can hold anything, also characters that do not belong in an address
+        original = plain_ascii(original)
         # Captured addresses often carry the default port (http://example.com:80/a.pdf)
         link = normalise(original)
         if wanted_type(link, domain, file_types) is None or link in seen:

@@ -119,15 +119,33 @@ def extract_authors(path, folder):
     return len(records), sorted(values, key=lambda text: (text.lower(), text))
 
 
+_NUMBER = re.compile(r"[+-]?[0-9]+(?:[.,][0-9]+)?")
+
+
+def inert_cell(cell):
+    """A spreadsheet program runs a cell that starts with = + - or @ as a formula, and the metadata comes
+    from downloaded files. Such a cell gets an apostrophe in front, which makes it plain text. Plain
+    numbers such as -5 or +0.3 are left as they are."""
+    if cell[:1] in ("=", "+", "-", "@", "\t", "\r", "\n") and not _NUMBER.fullmatch(cell):
+        return "'" + cell
+    return cell
+
+
 def extract_all_to_csv(path, folder, csv_path):
     """Write every metadata field of the files in a folder to a CSV file. Returns the number of files."""
     output = _run(path, ["-csv", "-q", "-q"], folder).decode("utf-8", errors="replace")
-    rows = list(csv.reader(io.StringIO(output)))
+    # Some metadata fields are far longer than the csv module accepts by default
+    csv.field_size_limit(max(csv.field_size_limit(), 1 << 27))
+    try:
+        # A value can hold a NUL character, which the csv module of older Python versions refuses
+        rows = list(csv.reader(io.StringIO(output.replace("\x00", ""), newline="")))
+    except csv.Error as error:
+        raise ValueError("ExifTool's CSV output could not be read (%s)" % error)
     if len(rows) < 2:
         return 0
     # The byte-order mark makes spreadsheet programs read the file as UTF-8
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as target:
-        target.write(output)
+        csv.writer(target).writerows([inert_cell(cell) for cell in row] for row in rows)
     return len(rows) - 1
 
 

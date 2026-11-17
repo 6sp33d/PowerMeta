@@ -5,19 +5,25 @@ from __future__ import annotations
 import argparse
 import datetime
 import os
+import re
 import subprocess
 import sys
 import time
 
 from . import __version__, exif, links, sources
-from .web import DEFAULT_USER_AGENT, FetchError, Fetcher, download
+from .web import DEFAULT_USER_AGENT, PROGRAM_USER_AGENT, FetchError, Fetcher, download
 
 SOURCES = ("archive", "bing", "duckduckgo")
 BROWSER_ENGINES = ("google", "bing", "duckduckgo")
 
+# Control characters, and the characters that reverse the direction of text
+_UNPRINTABLE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f‪-‮⁦-⁩]")
+
 
 def log(message=""):
-    print(message, flush=True)
+    # Much of what is printed comes from outside: addresses, metadata, the error text of a server.
+    # None of it may steer the terminal, so control characters are shown as "?".
+    print(_UNPRINTABLE.sub("?", str(message)), flush=True)
 
 
 def ask_yes_no(question):
@@ -49,8 +55,12 @@ def _name_list(text, allowed, option, parser):
     return names
 
 
-def find_files(domain, file_types, http_sources, browser_engines, user_agent, max_pages, delay, browser_name):
-    """Ask every chosen source. Returns (sorted links, {link: address of the Internet Archive's copy})."""
+def find_files(domain, file_types, http_sources, browser_engines, user_agent=None, max_pages=5, delay=2, browser_name="chrome"):
+    """Ask every chosen source.
+
+    Returns (sorted links, {link: address of the Internet Archive's copy}, interrupted). interrupted is
+    True if Ctrl+C ended the search early; what had been found by then is still returned.
+    """
     found, by_key, archive_copies = [], {}, {}
 
     def keep(link):
@@ -62,53 +72,65 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent, ma
             found.append(link)
         return by_key[key]
 
-    # The Internet Archive answers for all file types in a single request
     archive_entries = []
-    if "archive" in http_sources:
-        archive_entries = sources.search_archive(Fetcher(user_agent), domain, file_types, log=log)
+    interrupted = False
+    try:
+        # The Internet Archive answers for all file types in a single request. Its index is a service
+        # for programs, so it is told that this is PowerMeta unless another User-Agent was asked for.
+        if "archive" in http_sources:
+            archive_entries = sources.search_archive(Fetcher(user_agent or PROGRAM_USER_AGENT), domain, file_types, log=log)
 
-    # An engine that is searched through the browser is not also asked with plain requests
-    engines = [name for name in ("bing", "duckduckgo") if name in http_sources and name not in browser_engines]
-    duckduckgo_blocked = False
-    first = True
-    for file_type in file_types:
-        ask_bing = "bing" in engines
-        ask_duckduckgo = "duckduckgo" in engines and not duckduckgo_blocked
-        if not ask_bing and not ask_duckduckgo:
-            break
-        # The pause also applies between the last request for one file type and the first for the next
-        if not first and delay > 0:
-            time.sleep(delay)
-        first = False
+        # An engine that is searched through the browser is not also asked with plain requests
+        engines = [name for name in ("bing", "duckduckgo") if name in http_sources and name not in browser_engines]
+        duckduckgo_blocked = False
+        first = True
+        for file_type in file_types:
+            ask_bing = "bing" in engines
+            ask_duckduckgo = "duckduckgo" in engines and not duckduckgo_blocked
+            if not ask_bing and not ask_duckduckgo:
+                break
+            # The pause also applies between the last request for one file type and the first for the next
+            if not first and delay > 0:
+                time.sleep(delay)
+            first = False
 
-        if ask_bing:
-            for link in sources.search_bing(Fetcher(user_agent), domain, file_type, max_pages, delay, log):
+            if ask_bing:
+                for link in sources.search_bing(Fetcher(user_agent or DEFAULT_USER_AGENT), domain, file_type, max_pages, delay, log):
+                    keep(link)
+            if ask_duckduckgo:
+                # DuckDuckGo is left alone for the rest of the run once it has refused to answer
+                result, duckduckgo_blocked = sources.search_duckduckgo(
+                    Fetcher(user_agent or DEFAULT_USER_AGENT), domain, file_type, max_pages, delay, log
+                )
+                for link in result:
+                    keep(link)
+
+        if browser_engines:
+            from . import browser
+
+            # Each link is handed over as soon as it is found, so that nothing is lost if the search is cut short
+            for link in browser.search(browser_engines, domain, file_types, max_pages, delay, browser_name, log, on_link=keep):
                 keep(link)
-        if ask_duckduckgo:
-            # DuckDuckGo is left alone for the rest of the run once it has refused to answer
-            result, duckduckgo_blocked = sources.search_duckduckgo(
-                Fetcher(user_agent), domain, file_type, max_pages, delay, log
-            )
-            for link in result:
-                keep(link)
-
-    if browser_engines:
-        from . import browser
-
-        for link in browser.search(browser_engines, domain, file_types, max_pages, delay, browser_name, log):
-            keep(link)
+    except KeyboardInterrupt:
+        interrupted = True
+        log()
+        log("[!] Interrupted: the search stops here. What was found so far is kept.")
 
     # The Archive's files are added last, so that for a file both know the search engine's current
     # address is the one kept. Either way the Archive's copy is remembered for it.
     for entry in archive_entries:
         archive_copies.setdefault(keep(entry.link), entry.archive_copy)
 
-    return sorted(found), archive_copies
+    return sorted(found), archive_copies, interrupted
 
 
-def download_files(file_links, output_dir, user_agent=DEFAULT_USER_AGENT, archive_copies=None):
-    """Download every link into output_dir. Returns (downloaded, failed)."""
+def download_files(file_links, output_dir, user_agent=None, archive_copies=None, file_types=None):
+    """Download every link into output_dir. Returns (downloaded, failed).
+
+    file_types are the wanted file types: every saved file gets a name that ends in one of them.
+    """
     file_links = [link.strip() for link in file_links if link and link.strip()]
+    file_types = file_types or links.DEFAULT_FILE_TYPES
     log("[*] Downloading %d files now." % len(file_links))
     if not file_links:
         return 0, 0
@@ -120,7 +142,7 @@ def download_files(file_links, output_dir, user_agent=DEFAULT_USER_AGENT, archiv
     downloaded = failed = 0
     for link in file_links:
         # When downloading files if a file has the same name a number is added to it
-        name = links.safe_file_name(link)
+        name = links.safe_file_name(link, file_types)
         candidate, number = name, 1
         while os.path.exists(os.path.join(output_dir, candidate)):
             base, extension = os.path.splitext(name)
@@ -133,7 +155,7 @@ def download_files(file_links, output_dir, user_agent=DEFAULT_USER_AGENT, archiv
         try:
             # Target servers often have expired or self-signed certificates, so certificate errors are
             # ignored for them - and only for them
-            download(link, destination, user_agent, verify_certificate=False)
+            download(link, destination, user_agent or DEFAULT_USER_AGENT, verify_certificate=False)
         except FetchError as error:
             problem = str(error)
 
@@ -142,7 +164,7 @@ def download_files(file_links, output_dir, user_agent=DEFAULT_USER_AGENT, archiv
             log("[*] Not available from the site (%s). Trying the copy in the Internet Archive." % problem)
             time.sleep(1)
             try:
-                download(archive_copies[link], destination, user_agent, verify_certificate=True)
+                download(archive_copies[link], destination, user_agent or PROGRAM_USER_AGENT, verify_certificate=True)
                 problem = None
             except FetchError as error:
                 problem = str(error)
@@ -191,6 +213,41 @@ def extract_metadata(folder, csv_path=None):
     return True
 
 
+def read_link_list(path):
+    """The links in a list file, one per line. Windows PowerShell writes such files as UTF-16."""
+    with open(path, "rb") as source:
+        raw = source.read()
+    encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+    lines = raw.decode(encoding, errors="replace").splitlines()
+    return [links.plain_ascii(line.strip()) for line in lines if line.strip()]
+
+
+def _cannot_write(path):
+    """Why a file cannot be written at this path, or None if nothing stands in the way."""
+    folder = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(folder):
+        return "the folder %s does not exist" % folder
+    if os.path.isdir(path):
+        return "it is a folder"
+    if not os.access(path if os.path.exists(path) else folder, os.W_OK):
+        return "it is not writable"
+    return None
+
+
+def write_link_list(path, file_links):
+    """Write the links to a file. Returns False, after printing them instead, if that fails."""
+    log("[*] Writing links to a file at %s" % path)
+    try:
+        with open(path, "w", encoding="ascii", errors="replace", newline="\n") as target:
+            target.write("\n".join(file_links) + "\n")
+        return True
+    except OSError as error:
+        log("[!] The links could not be written to %s (%s). They are listed here instead:" % (path, error))
+        for link in file_links:
+            log(link)
+        return False
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="python -m powermeta",
@@ -207,7 +264,11 @@ def build_parser():
     parser.add_argument("--download", action="store_true", help="download the files without asking")
     parser.add_argument("--extract", action="store_true", help="extract metadata without asking")
     parser.add_argument("--csv", metavar="FILE", default="", help="when extracting, write all metadata (not just Author and Creator) to FILE")
-    parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT, help="the User-Agent to send")
+    parser.add_argument(
+        "--user-agent", default="",
+        help="the User-Agent to send with plain web requests (default: a browser-like one for the search engines "
+        'and the target site, "%s" for the Internet Archive)' % PROGRAM_USER_AGENT,
+    )
     parser.add_argument("--max-pages", type=int, default=5, help="the most result pages to read per search (default: %(default)s)")
     parser.add_argument("--delay", type=float, default=2, help="seconds to wait between two requests to the same search engine (default: %(default)s)")
     parser.add_argument(
@@ -217,7 +278,8 @@ def build_parser():
     parser.add_argument(
         "--browser", nargs="?", const=",".join(BROWSER_ENGINES), default="", metavar="ENGINES",
         help="also search in a visible browser window that you can use to answer any check the search engine "
-        "shows: google, bing, duckduckgo (all three if no list is given). Needs 'pip install selenium'.",
+        "shows: google, bing, duckduckgo (all three if no list is given). Needs 'pip install selenium'. "
+        "To read where a Google result leads, the browser opens the result's link.",
     )
     parser.add_argument("--browser-name", choices=("chrome", "edge"), default="chrome", help="the browser to open (default: %(default)s)")
     parser.add_argument("--extract-dir", metavar="DIR", default="", help="only extract metadata from the files in DIR")
@@ -227,6 +289,8 @@ def build_parser():
 
 
 def main(argv=None):
+    """Run the command line. Returns the exit code: 0, 1 if something asked for could not be done,
+    130 after Ctrl+C."""
     # Metadata can hold characters the console cannot show (a Windows console often knows one code page
     # only). Show a "?" for those instead of stopping with an error.
     for stream in (sys.stdout, sys.stderr):
@@ -234,7 +298,15 @@ def main(argv=None):
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError):
             pass
+    try:
+        return _run(argv)
+    except KeyboardInterrupt:
+        log()
+        log("[!] Interrupted.")
+        return 130
 
+
+def _run(argv):
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -244,10 +316,14 @@ def main(argv=None):
     if args.extract_dir:
         return 0 if extract_metadata(args.extract_dir, args.csv or None) else 1
 
-    if not args.domain:
-        parser.error("the target domain is required: -d targetdomain.com")
+    if not args.domain and not args.list_in:
+        parser.error("the target domain is required: -d targetdomain.com (or a list of links: --list-in FILE)")
     if args.max_pages < 1:
         parser.error("--max-pages must be at least 1")
+    file_types = links.parse_file_types(args.types)
+    if not file_types:
+        log('[!] No file types to search for. Pass a comma separated list such as "pdf, docx".')
+        return 1
 
     archive_copies = {}
     if args.list_in:
@@ -255,8 +331,11 @@ def main(argv=None):
         if not os.path.isfile(args.list_in):
             log("[!] The file list %s does not exist." % args.list_in)
             return 1
-        with open(args.list_in, encoding="utf-8-sig", errors="replace") as source:
-            file_links = [line.strip() for line in source if line.strip()]
+        try:
+            file_links = read_link_list(args.list_in)
+        except OSError as error:
+            log("[!] The file list %s could not be read: %s" % (args.list_in, error))
+            return 1
         log("[*] Using the file list at %s" % args.list_in)
         log("[*] A total of %d files were found." % len(file_links))
     else:
@@ -264,23 +343,30 @@ def main(argv=None):
         if not links.is_valid_host(domain):
             log("[!] '%s' is not a domain name. Use a name such as targetdomain.com." % args.domain)
             return 1
-        file_types = links.parse_file_types(args.types)
-        if not file_types:
-            log('[!] No file types to search for. Pass a comma separated list such as "pdf, docx".')
-            return 1
         http_sources = _name_list(args.sources, SOURCES, "--sources", parser)
         browser_engines = _name_list(args.browser, BROWSER_ENGINES, "--browser", parser)
+        # A search can take a long time: find out now, not afterwards, that its result cannot be saved
+        if args.list_out:
+            problem = _cannot_write(args.list_out)
+            if problem:
+                log("[!] The links cannot be written to %s: %s." % (args.list_out, problem))
+                return 1
 
-        file_links, archive_copies = find_files(
-            domain, file_types, http_sources, browser_engines, args.user_agent, args.max_pages, args.delay, args.browser_name
+        file_links, archive_copies, interrupted = find_files(
+            domain, file_types, http_sources, browser_engines, args.user_agent or None, args.max_pages, args.delay, args.browser_name
         )
         log("[*] A total of %d files were discovered." % len(file_links))
         log()
 
-        if args.list_out and file_links:
-            log("[*] Writing links to a file at %s" % args.list_out)
-            with open(args.list_out, "w", encoding="ascii", errors="replace", newline="\n") as target:
-                target.write("\n".join(file_links) + "\n")
+        saved = bool(args.list_out and file_links) and write_link_list(args.list_out, file_links)
+        if interrupted:
+            if saved:
+                log("[*] To download these files later, run again with: --list-in \"%s\"" % args.list_out)
+            elif file_links and not args.list_out:
+                log("[*] The links found so far (use --list-out FILE to have them written to a file):")
+                for link in file_links:
+                    log(link)
+            return 130
 
     if not file_links:
         log("[*] Nothing to download.")
@@ -289,20 +375,29 @@ def main(argv=None):
     # If no output directory was named, use one named after the current date and time
     output_dir = args.output_dir or datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
 
+    status = 0
     if args.download or ask_yes_no("Would you like to download all of the files discovered?"):
-        download_files(file_links, output_dir, args.user_agent, archive_copies)
+        try:
+            downloaded, failed = download_files(file_links, output_dir, args.user_agent or None, archive_copies, file_types)
+        except OSError as error:
+            log("[!] The output directory %s cannot be used: %s" % (output_dir, error))
+            return 1
+        if downloaded == 0:
+            # Every download failed: there is nothing to extract metadata from
+            return 1 if failed else 0
     else:
         log("[*] No files will be downloaded.")
 
     # Without a folder of files there is nothing to extract metadata from
     if not os.path.isdir(output_dir):
-        return 0
+        return status
 
     if args.extract or ask_yes_no("Would you like to extract metadata from all of the files downloaded now?"):
-        extract_metadata(output_dir, args.csv or None)
+        if not extract_metadata(output_dir, args.csv or None):
+            status = 1
     else:
         log(
             "[*] No metadata will be extracted at this time. To extract it later run: "
             'python -m powermeta --extract-dir "%s"' % output_dir
         )
-    return 0
+    return status

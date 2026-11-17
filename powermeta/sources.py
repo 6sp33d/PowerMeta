@@ -86,7 +86,7 @@ def search_bing(fetcher, domain, file_type, max_pages=5, delay=2, log=print):
         try:
             page = fetcher.get(BING_URL + "?" + urllib.parse.urlencode({"q": query, "first": first}))
         except FetchError as error:
-            log("[!] Bing did not answer: %s" % error)
+            log("[!] Bing did not answer for page %d: %s" % (page_number, error))
             break
 
         results = links.count_bing_results(page.text)
@@ -134,6 +134,8 @@ def search_duckduckgo(fetcher, domain, file_type, max_pages=5, delay=2, log=prin
             if page_number == 1:
                 log("[!] DuckDuckGo did not answer the search (%s). It is skipped for the rest of this run." % error)
                 blocked = True
+            else:
+                log("[!] DuckDuckGo did not answer for page %d (%s). The results so far are kept." % (page_number, error))
             break
 
         if links.is_duckduckgo_bot_check(page.text):

@@ -102,6 +102,14 @@ class DuckDuckGoLinks(unittest.TestCase):
         self.assertEqual(form, {"q": "site:example.com filetype:pdf", "s": "60", "vqd": "4-222&x"})
         self.assertIsNone(links.duckduckgo_next_form(page, after=60))
 
+    def test_next_form_is_the_nearest_one(self):
+        # Another form on the page with a query and a larger offset is not "Next"
+        decoy = '<form action="/elsewhere"><input type="hidden" name="q" value="x"><input type="hidden" name="s" value="999999"></form>'
+        page = duckduckgo_page([], next_offset=30).replace("</body>", decoy + "</body>")
+        self.assertEqual(links.duckduckgo_next_form(page)["s"], "30")
+        self.assertEqual(links.duckduckgo_next_form(page, after=30)["s"], "999999")
+        self.assertIsNone(links.duckduckgo_next_form(page.replace('value="30"', 'value="3 0"').replace('value="999999"', 'value="-5"')))
+
 
 class GoogleLinks(unittest.TestCase):
     def test_kinds_of_link(self):
@@ -168,9 +176,9 @@ class FileNames(unittest.TestCase):
             "https://example.com/con.pdf": "_con.pdf",
             "https://example.com/x/café.pdf": "caf_.pdf",
             "https://example.com/x/a.pdf.": "a.pdf",
-            "https://example.com/a.pdf/exiftool.exe": "_exiftool.exe",
+            "https://example.com/a.pdf/exiftool.exe": "_exiftool.exe.pdf",
             "https://example.com/x/EXIFTOOL": "_EXIFTOOL",
-            "https://example.com/x/.ExifTool_config": "_.ExifTool_config",
+            "https://example.com/x/.ExifTool_config": "_.ExifTool_config.download",
             "https://example.com/x/-o.pdf": "_-o.pdf",
             "https://example.com/x/my-exiftool-notes.pdf": "my-exiftool-notes.pdf",
             "https://example.com/x/..%2F..%2Fetc%2Fpasswd.pdf": "_..%2F..%2Fetc%2Fpasswd.pdf",
@@ -182,6 +190,82 @@ class FileNames(unittest.TestCase):
         name = links.safe_file_name("https://example.com/" + "a" * 300 + ".pdf")
         self.assertEqual(len(name), 150)
         self.assertTrue(name.endswith(".pdf"))
+        # A name that had to get the wanted ending added still has it after shortening
+        name = links.safe_file_name("https://example.com/" + "a" * 300 + ".exe?x=.pdf")
+        self.assertEqual(len(name), 150)
+        self.assertTrue(name.endswith("a.pdf"))
+        name = links.safe_file_name("https://example.com/" + "a" * 300 + "." + "b" * 30)
+        self.assertEqual(len(name), 150)
+        self.assertTrue(name.endswith(".download"))
+
+    def test_the_site_does_not_choose_the_ending(self):
+        # A link counts as a wanted file when its query names the type, so the last part of the path
+        # can be anything. Saved under that name, a file could be run by mistake or picked up by a
+        # program that is started in the folder.
+        cases = {
+            "https://example.com/files/argparse.py?v=.pdf": "argparse.py.pdf",
+            "https://example.com/files/setup.exe?doc=.pdf": "setup.exe.pdf",
+            "https://example.com/files/run.bat?x.pdf": "run.bat.pdf",
+            "https://example.com/files/report.pdf.lnk": "report.pdf.lnk.pdf",
+            "https://example.com/files/a.pdf.part": "a.pdf.part.pdf",
+            "https://example.com/get.php?file=annual.docx&x=1": "get.php.docx",
+            "https://example.com/download?file=annual.docx": "download.docx",
+            "https://example.com/?file=annual.xlsx": "download.xlsx",
+            "https://example.com/files/REPORT.PDF": "REPORT.PDF",
+            "https://example.com/files/setup.exe.": "setup.exe.download",
+            "https://example.com/files/tool.py": "tool.py.download",
+            "https://example.com/files/readme": "readme",
+        }
+        for link, expected in cases.items():
+            self.assertEqual(links.safe_file_name(link), expected, link)
+        # The wanted types are those of this run
+        self.assertEqual(links.safe_file_name("https://example.com/a.odt", ["odt"]), "a.odt")
+        self.assertEqual(links.safe_file_name("https://example.com/a.pdf", ["odt"]), "a.pdf.download")
+        self.assertEqual(links.safe_file_name("https://example.com/a.pdf?as=b.odt", ["odt"]), "a.pdf.odt")
+
+    def test_device_names_with_spaces(self):
+        for link, expected in {
+            "https://example.com/dir/nul .pdf": "_nul .pdf",
+            "https://example.com/dir/prn  .x.pdf": "_prn  .x.pdf",
+            "https://example.com/dir/COM0.pdf": "_COM0.pdf",
+            "https://example.com/dir/console.pdf": "console.pdf",
+        }.items():
+            self.assertEqual(links.safe_file_name(link), expected, link)
+
+
+class Pages(unittest.TestCase):
+    def test_the_href_is_read_from_the_right_attribute(self):
+        cases = {
+            '<a data-href="http://t.com/decoy.pdf" href="http://t.com/real.pdf">x</a>': ["http://t.com/real.pdf"],
+            '<a title="x href=http://t.com/decoy.pdf" href="http://t.com/real.pdf">x</a>': ["http://t.com/real.pdf"],
+            '<a title="a>b" href="http://t.com/gt.pdf">x</a>': ["http://t.com/gt.pdf"],
+            "<A CLASS=x HREF='http://t.com/a.pdf?x=1&amp;y=2'>x</A>": ["http://t.com/a.pdf?x=1&y=2"],
+            "<a href=http://t.com/bare.pdf>x</a><a>no address</a><a href=''>empty</a>": ["http://t.com/bare.pdf"],
+            '<script>var s = "<a href=\\"http://t.com/in-script.pdf\\">";</script><a href="/real">x</a>': ["/real"],
+            "": [],
+        }
+        for page, expected in cases.items():
+            self.assertEqual(links.links_from_html(page), expected, page)
+        self.assertEqual(links.links_from_html(None), [])
+
+    def test_a_page_with_thousands_of_unfinished_tags_is_read_quickly(self):
+        import time
+
+        started = time.time()
+        self.assertEqual(links.links_from_html("<a " * 20000), [])
+        self.assertIsNone(links.duckduckgo_next_form("<form>" * 20000))
+        self.assertLess(time.time() - started, 5)
+
+    def test_the_older_reader_is_used_when_the_parser_gives_up(self):
+        from .support import patched
+
+        def refuse(page):
+            return None
+
+        page = duckduckgo_page(["https://example.com/a.pdf?x=1&amp;y=2"], next_offset=30)
+        with patched(links, _read_page=refuse):
+            self.assertEqual(links.links_from_html(page), ["https://example.com/a.pdf?x=1&y=2"])
+            self.assertEqual(links.duckduckgo_next_form(page), {"q": "q", "s": "30", "vqd": "4-222&x"})
 
 
 class ArchiveIndex(unittest.TestCase):
@@ -225,6 +309,17 @@ class ArchiveIndex(unittest.TestCase):
             entries[0].archive_copy, "https://web.archive.org/web/20190102030405id_/http://www.example.com:80/docs/Report.pdf"
         )
         self.assertEqual(links.parse_archive_index("", "example.com", ["pdf"]), [])
+
+    def test_addresses_in_the_index_are_made_plain(self):
+        # An address in the index can hold characters that would change what the terminal shows, or
+        # that cannot be sent in a request
+        answer = "http://example.com/files/B\u00fccher.pdf 20200101000000\nhttp://example.com/files/\x1b[31mred.pdf 20200101000000\n"
+        entries = links.parse_archive_index(answer, "example.com", ["pdf"])
+        self.assertEqual(
+            [entry.link for entry in entries],
+            ["http://example.com/files/B%C3%BCcher.pdf", "http://example.com/files/%1B[31mred.pdf"],
+        )
+        self.assertEqual(entries[0].archive_copy, "https://web.archive.org/web/20200101000000id_/http://example.com/files/B%C3%BCcher.pdf")
 
 
 if __name__ == "__main__":

