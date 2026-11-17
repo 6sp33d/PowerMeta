@@ -1,49 +1,53 @@
-﻿# Disable cert checks
-add-type @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class TrustAllCertsPolicy : ICertificatePolicy {
-    public bool CheckValidationResult(
-        ServicePoint srvPoint, X509Certificate certificate,
-        WebRequest request, int certificateProblem) {
-        return true;
-    }
+﻿# PowerMeta
+# Finds documents that a domain has published, downloads them, and reads the metadata
+# (author, creator, ...) out of them with ExifTool.
+# Original author: Beau Bullock (@dafthack)
+#
+# Keep this file plain ASCII: Windows PowerShell 5.1 misreads other characters in script files.
+
+# TLS: Windows PowerShell on an old .NET Framework offers only SSL3/TLS 1.0 by default, which
+# search engines no longer accept, so TLS 1.2 is added in that case. A value of 0 means
+# "SystemDefault" (Windows already negotiates TLS 1.2/1.3) and is left alone.
+& {
+    try {
+        $current = [int][System.Net.ServicePointManager]::SecurityProtocol
+        $tls12 = [int][System.Net.SecurityProtocolType]::Tls12
+        if ($current -ne 0 -and ($current -band $tls12) -eq 0) {
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]($current -bor $tls12)
+        }
+    } catch { }
 }
-"@
-$AllProtocols = [System.Net.SecurityProtocolType]'Ssl3,Tls,Tls11,Tls12'
-[System.Net.ServicePointManager]::SecurityProtocol = $AllProtocols
-[System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
 
 Function Invoke-PowerMeta{
 
     <#
     .SYNOPSIS
-    This function searches for publicly available files hosted on various sites for a particular domain by using specially crafted Google, and Bing searches. It then allows for the download of those files from the target domain. After retrieving the files, the metadata associated with them can be analyzed by PowerMeta. Some interesting things commonly found in metadata are usernames, domains, software titles, and computer names.
+    This function searches for publicly available files hosted on a particular domain by using search engine queries such as "site:targetdomain.com filetype:pdf". It then allows for the download of those files from the target domain. After retrieving the files, the metadata associated with them can be analyzed by PowerMeta. Some interesting things commonly found in metadata are usernames, domains, software titles, and computer names.
 
     PowerMeta Function: Invoke-PowerMeta
     Author: Beau Bullock (@dafthack)
     License: BSD 3-Clause
     Required Dependencies: None
-    Optional Dependencies: None
-    
+    Optional Dependencies: ExifTool 12.24 or later for metadata extraction (see Install-ExifTool)
+
     .DESCRIPTION
-    This function searches for publicly available files hosted on various sites for a particular domain by using specially crafted Google, and Bing searches. It then allows for the download of those files from the target domain. After retrieving the files, the metadata associated with them can be analyzed by PowerMeta. Some interesting things commonly found in metadata are usernames, domains, software titles, and computer names.
-    
+    This function searches for publicly available files hosted on a particular domain by using search engine queries such as "site:targetdomain.com filetype:pdf". It then allows for the download of those files from the target domain. After retrieving the files, the metadata associated with them can be analyzed by PowerMeta. Some interesting things commonly found in metadata are usernames, domains, software titles, and computer names.
+
     .PARAMETER TargetDomain
-    The target domain to search for files. 
+    The target domain to search for files.
 
     .PARAMETER FileTypes
     A comma seperated list of file extensions to search for. By default PowerMeta searches for "pdf, docx, xlsx, doc, xls, pptx, ppt".
 
     .PARAMETER OutputList
-    A file to output the list of links discovered through web searching to. 
+    A file to output the list of links discovered through web searching to.
 
     .PARAMETER OutputDir
     A directory to store all downloaded files in.
 
     .PARAMETER TargetFileList
-    List of file links to download.
-    
+    List of file links to download. When this is given no searching is done.
+
     .PARAMETER Download
     Instead of being prompted interactively pass this flag to auto-download files found.
 
@@ -59,34 +63,44 @@ Function Invoke-PowerMeta{
     .PARAMETER MaxSearchPages
     The maximum number of pages to search on each search engine.
 
+    .PARAMETER SearchDelay
+    Seconds to wait between two requests to the same search engine. Default 2.
+
     .Example
-    
+
     C:\PS> Invoke-PowerMeta -TargetDomain targetdomain.com
     Description
     -----------
-    This command will initiate Google and Bing searches for files on the 'targetdomain.com' domain ending with a file extension of pdf, docx, xlsx, doc, xls, pptx, or pptx. Once it has finished crafting this list it will prompt the user asking if they wish to download the files from the target domain. After downloading files it will prompt again for extraction of metadata from those files.
+    This command will search for files on the 'targetdomain.com' domain ending with a file extension of pdf, docx, xlsx, doc, xls, pptx, or ppt. Once it has finished crafting this list it will prompt the user asking if they wish to download the files from the target domain. After downloading files it will prompt again for extraction of metadata from those files.
 
     .Example
-    
+
     C:\PS> Invoke-PowerMeta -TargetDomain targetdomain.com -FileTypes "pdf, xml" -Download -Extract
     Description
     -----------
-    This command will initiate Google and Bing searches for files on the 'targetdomain.com' domain ending with a file extension of pdf, or xml. It will then automatically download them from the target domain and extract metadata.
+    This command will search for files on the 'targetdomain.com' domain ending with a file extension of pdf, or xml. It will then automatically download them from the target domain and extract metadata.
+
+    .Example
+
+    C:\PS> Invoke-PowerMeta -TargetDomain targetdomain.com -OutputList target-domain-links.txt
+    Description
+    -----------
+    This command will search for files on the 'targetdomain.com' domain and write the links of the files found to disk in a file called "target-domain-links.txt".
 
     .Example
 
     C:\PS> Invoke-PowerMeta -TargetDomain targetdomain.com -TargetFileList target-domain-links.txt
     Description
     -----------
-    This command will initiate Google and Bing searches for files on the 'targetdomain.com' domain ending with a file extension of pdf, docx, xlsx, doc, xls, pptx, or pptx and write the links of files found to disk in a file called "target-domain-links.txt".
+    This command skips searching and uses the links listed in "target-domain-links.txt" (one per line) instead.
 
     .Example
 
     C:\PS> Invoke-PowerMeta -TargetDomain targetdomain.com -MaxSearchPages 2 -ExtractAllToCsv all-target-metadata.csv
     Description
     -----------
-    This command will initiate Google and Bing searches for files on the 'targetdomain.com' domain ending with a file extension of pdf, docx, xlsx, doc, xls, pptx, or pptx but only search the first to pages. All metadata (not just the default fields) will be saved in a CSV called all-target-metadata.csv.
-    
+    This command will search for files on the 'targetdomain.com' domain but only search the first two pages of results. All metadata (not just the default fields) will be saved in a CSV called all-target-metadata.csv.
+
     .Example
 
     C:\PS> ExtractMetadata -OutputDir .\2017-03-031-144953\ -ExtractAllToCsv all-target-metadata.csv
@@ -132,215 +146,90 @@ Function Invoke-PowerMeta{
 
         [Parameter(Position = 8, Mandatory = $false)]
         [string]
-        $UserAgent = "Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko",
-        
+        $UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+
         [Parameter(Position = 9, Mandatory = $false)]
         [int]
-        $MaxSearchPages = 5
+        $MaxSearchPages = 5,
+
+        [Parameter(Mandatory = $false)]
+        [int]
+        $SearchDelay = 2
 
         )
+
+    $targetlinks = @()
 
     #If no target file list was provided we will perform searches and craft one.
     If ($TargetFileList -eq "")
         {
-
-            $filetypearray = @()
-            $filetypearray = $FileTypes -split ", "
-
-            $validlinks = @()
-            foreach ($filetype in $filetypearray)
+            $domain = Get-PowerMetaHostName $TargetDomain
+            if ($domain -notmatch '^[\p{L}\p{N}]([\p{L}\p{N}.\-]*[\p{L}\p{N}])?$')
                 {
-            
-                #Performing a Google search first
-
-                Write-Output "[*] Searching Google for 'site:$TargetDomain filetype:$filetype'"
-                $googlesearch = "https://www.google.com/search?q=site:$TargetDomain+filetype:$filetype&num=100"
-                $pagelinks = @()
-                $pagelinks = (Invoke-WebRequest -Uri $googlesearch -UserAgent $UserAgent -UseBasicParsing).Links
-                $hrefs = @()
-                $hrefs = $pagelinks.href
-    
-                #Adding each valid url from page 1 to a list of valid links
-                Write-Output "[*] Now Analyzing page 1 of Google search results (100 results per page)"
-                foreach($url in $hrefs){
-                    if (($url -like "*$TargetDomain*") -and ($url -like "*.$filetype*"))
-                        {
-                        if ($url -like "*http://*")
-                            {
-                            $strippedurl = [regex]::match($url,"http([^\)]+).$filetype").Value
-                            $validlinks += $strippedurl
-                            }
-                        elseif ($url -like "*https://*")
-                            {
-                            $strippedurl = [regex]::match($url,"https([^\)]+).$filetype").Value
-                            $validlinks += $strippedurl
-                            }
-                        }
-         
-                    }
-                #Determining if there are more than one page
-                $otherpages = @()
-                $otherpageslimit = @()
-                foreach($url in $hrefs)
-                    {
-                    if ($url -like "*search?q*start=*")
-                        {
-                        $otherpages += "https://www.google.com$url" + "&num=100"
-                        }
-
-                    }
-                
-                $otherpages = $otherpages | sort | unique
-                $pagecount = $otherpages.count
-                if ($pagecount -gt $MaxSearchPages)
-                    {
-                        $totalpagelimit = $MaxSearchPages - 1
-                        for($j=0; $j -lt $totalpagelimit; $j++)
-                        {                                    
-                            $otherpageslimit += $otherpages[$j]
-                        }
-                    }
-
-                $otherpageslimit = $otherpageslimit -replace "&amp;","&"
-                $morepagelinks = @()
-                $morehrefs = @()
-                $i = 2
-                #for each additional page in the Google search results find links
-                foreach($page in $otherpageslimit)
-                    {
-                    Write-Output "[*] Now Analyzing page $i of Google search results (100 results per page)"
-                    $i++
-                    $morepagelinks = (Invoke-WebRequest -Uri $page -UserAgent $UserAgent -UseBasicParsing).Links
-                    $morehrefs = $morepagelinks.href
-                    foreach($url in $morehrefs){
-                    if (($url -like "*$TargetDomain*") -and ($url -like "*.$filetype*"))
-                        {
-                        if ($url -like "*http://*")
-                            {
-                            $strippedurl = [regex]::match($url,"http([^\)]+).$filetype").Value
-                            $validlinks += $strippedurl
-                            }
-                        elseif ($url -like "*https://*")
-                            {
-                            $strippedurl = [regex]::match($url,"https([^\)]+).$filetype").Value
-                            $validlinks += $strippedurl
-                            }
-                        }
-         
-                    }
-                    }
-
-                #Performing a Bing search second
-
-                Write-Output "[*] Searching Bing for 'site:$TargetDomain filetype:$filetype'"
-                $bingsearch = "http://www.bing.com/search?q=site:$TargetDomain%20filetype:$filetype&count=30"
-                $bingpagelinks = @()
-                $bingpagelinks = (Invoke-WebRequest -Uri $bingsearch -UserAgent $UserAgent -UseBasicParsing).Links
-                $binghrefs = @()
-                $binghrefs = $bingpagelinks.href
-            
-                #Adding each valid link from page 1 to an array
-                Write-Output "[*] Now Analyzing page 1 of Bing search results (30 results per page)"
-                foreach($url in $binghrefs){
-                    if (($url -like "*$TargetDomain*") -and ($url -like "*.$filetype*"))
-                        {
-                        if ($url -like "*http://*")
-                            {
-                            $strippedurl = [regex]::match($url,"http([^\)]+).$filetype").Value
-                            $validlinks += $strippedurl
-                            }
-                        elseif ($url -like "*https://*")
-                            {
-                            $strippedurl = [regex]::match($url,"https([^\)]+).$filetype").Value
-                            $validlinks += $strippedurl
-                            }
-                        }
-                    }
-                $bingotherpages = @()
-                
-                #Determining if there are more pages to search
-                foreach($url in $binghrefs)
-                    {
-                    if ($url -like "*search?q*first=*")
-                        {
-                        $bingotherpages += "https://www.bing.com$url" + "&count=30"
-                        }
-
-                    }
-                $bingotherpages = $bingotherpages | sort | unique
-                $bingotherpages = $bingotherpages -replace "&amp;","&"
-                $morepagelinks = @()
-                $morehrefs = @()
-                $i = 2
-
-                #for each additional page in the Bing search results find links
-                foreach($page in $bingotherpages)
-                    {
-                    Write-Output "[*] Now Analyzing page $i of Bing search results (30 results per page)"
-                    $i++
-                    $morepagelinks = (Invoke-WebRequest -Uri $page -UserAgent $UserAgent -UseBasicParsing).Links
-                    $morehrefs = $morepagelinks.href
-                    foreach($url in $morehrefs){
-                    if (($url -like "*$TargetDomain*") -and ($url -like "*.$filetype*"))
-                        {
-                        if ($url -like "*http://*")
-                            {
-                            $strippedurl = [regex]::match($url,"http([^\)]+).$filetype").Value
-                            $validlinks += $strippedurl
-                            }
-                        elseif ($url -like "*https://*")
-                            {
-                            $strippedurl = [regex]::match($url,"https([^\)]+).$filetype").Value
-                            $validlinks += $strippedurl
-                            }
-                        }
-         
-                    }
-                    }
-           
-         
+                Write-Output "[!] '$TargetDomain' is not a domain name. Use a name such as targetdomain.com."
+                return
                 }
 
-                $targetlinks = @()
-                #getting rid of webcache links
-                foreach ($link in $validlinks)
-                    {
-                    if ($link -notlike "*webcache.google*")
-                        {
-                        $targetlinks += $link
-                        }
-                    }
-                $targetlinks = $targetlinks | sort | unique
+            $filetypearray = @(Get-PowerMetaFileTypeList $FileTypes)
+            if ($filetypearray.Count -eq 0)
+                {
+                Write-Output "[!] No file types to search for. Pass a comma separated list such as `"pdf, docx`"."
+                return
+                }
 
-                Write-Output ('[*] A total of ' + $targetlinks.count + ' files were discovered.')
-                Write-Output "`n"
-
-                #If an OutputList is specified write the results to disk
-                If ($OutputList -ne "")
+            $validlinks = New-Object System.Collections.Generic.List[string]
+            foreach ($filetype in $filetypearray)
+                {
+                $found = @(Search-PowerMetaBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay)
+                foreach ($link in $found)
                     {
-                    Write-Output "[*] Writing links to a file at $OutputList"
-                    $targetlinks | Out-File -Encoding ascii $OutputList
+                    if (-not $validlinks.Contains($link)) { $validlinks.Add($link) }
                     }
+                }
+
+            $targetlinks = @($validlinks | Sort-Object)
+
+            Write-Output ('[*] A total of ' + $targetlinks.Count + ' files were discovered.')
+            Write-Output "`n"
+
+            #If an OutputList is specified write the results to disk
+            If ($OutputList -ne "" -and $targetlinks.Count -gt 0)
+                {
+                Write-Output "[*] Writing links to a file at $OutputList"
+                $targetlinks | Out-File -Encoding ascii $OutputList
+                }
 
         }
-    #If a target list was specified let's use that.
-    If ($TargetFileList -ne "")
-
+    else
         {
-        $targetlinks = Get-Content $TargetFileList
-        Write-Output "[*]Using the file list at $TargetFileList"
-        Write-Output ('[*] A total of ' + $targetlinks.count + ' files were found.')
-        }
-    # If no output directory was named we will create one in with the current date/time.
-        If($OutputDir -eq "")
+        #If a target list was specified let's use that.
+        if (-not (Test-Path -LiteralPath $TargetFileList -PathType Leaf))
             {
-                $OutputDir = Get-Date -format yyyy-MM-dd-HHmmss
+            Write-Output "[!] The file list $TargetFileList does not exist."
+            return
             }
+        $targetlinks = @(Get-Content -LiteralPath $TargetFileList | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne '' })
+        Write-Output "[*] Using the file list at $TargetFileList"
+        Write-Output ('[*] A total of ' + $targetlinks.Count + ' files were found.')
+        }
+
+    if ($targetlinks.Count -eq 0)
+        {
+        Write-Output "[*] Nothing to download."
+        return
+        }
+
+    # If no output directory was named we will create one in with the current date/time.
+    If($OutputDir -eq "")
+        {
+            $OutputDir = Get-Date -format yyyy-MM-dd-HHmmss
+        }
+
     If ($Download)
     {
         Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent
     }
-    elseif($Download -eq $false)
+    else
         {
             $title = "Download Files?"
             $message = "Would you like to download all of the files discovered?"
@@ -350,7 +239,7 @@ Function Invoke-PowerMeta{
 
             $options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)
 
-            $result = $host.ui.PromptForChoice($title, $message, $options, 0) 
+            $result = $host.ui.PromptForChoice($title, $message, $options, 0)
 
             switch ($result)
                 {
@@ -362,18 +251,19 @@ Function Invoke-PowerMeta{
                 }
 
         }
+
+    # Without a folder of files there is nothing to extract metadata from.
+    if (-not (Test-Path -LiteralPath $OutputDir -PathType Container))
+        {
+        return
+        }
+
     If ($Extract)
         {
             Write-Output "[*] Now extracting metadata from the files."
-            If ($ExtractAllToCsv -ne "")
-            {
-                ExtractMetadata -OutputDir $OutputDir -ExtractAllToCsv $ExtractAllToCsv
-            }
-            else{
-                ExtractMetadata -OutputDir $OutputDir
-            }
+            ExtractMetadata -OutputDir $OutputDir -ExtractAllToCsv $ExtractAllToCsv
         }
-    elseif($Extract -eq $false)
+    else
         {
             $title = "Extract Metadata?"
             $message = "Would you like to extract metadata from all of the files downloaded now?"
@@ -383,31 +273,243 @@ Function Invoke-PowerMeta{
 
             $options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)
 
-            $result = $host.ui.PromptForChoice($title, $message, $options, 0) 
+            $result = $host.ui.PromptForChoice($title, $message, $options, 0)
 
             switch ($result)
                 {
                  0 {
                     Write-Output "[*] Now extracting metadata from the files."
-                    If ($ExtractAllToCsv)
-                    {
-                        ExtractMetadata -OutputDir $OutputDir -ExtractAllToCsv
-                    }
-                    else{
-                        ExtractMetadata -OutputDir $OutputDir
-                    }
+                    ExtractMetadata -OutputDir $OutputDir -ExtractAllToCsv $ExtractAllToCsv
                    }
                  1 {"[*] No metadata will be extracted at this time. If you wish to extract metadata later you can run the ExtractMetadata function on a directory of files like so: PS C:>ExtractMetadata -OutputDir `"C:\Users\username\directory-of-files\`""}
                 }
         }
 }
+
+#Splits "pdf, docx,xlsx" into clean lower-case extensions
+function Get-PowerMetaFileTypeList {
+    param([string]$FileTypes)
+
+    $types = @()
+    foreach ($entry in ($FileTypes -split ','))
+        {
+        $clean = $entry.Trim().TrimStart('.').ToLowerInvariant()
+        if ($clean -eq '') { continue }
+        if ($clean -notmatch '^[a-z0-9]{1,12}$')
+            {
+            Write-Warning "Ignoring file type '$($entry.Trim())': use letters and digits only, for example pdf."
+            continue
+            }
+        if ($types -notcontains $clean) { $types += $clean }
+        }
+    $types
+}
+
+#Reduces "https://www.TargetDomain.com/path" or "*.targetdomain.com" to a bare host name
+function Get-PowerMetaHostName {
+    param([string]$TargetDomain)
+
+    $name = $TargetDomain.Trim().ToLowerInvariant()
+    $name = $name -replace '^[a-z][a-z0-9+.\-]*://', ''
+    $name = $name -replace '[/?#].*$', ''
+    $name = $name -replace '^.*@', ''
+    $name = $name -replace ':\d+$', ''
+    $name = $name -replace '^\*\.', ''
+    $name.Trim('.')
+}
+
+#Fetches a page and returns its text, or nothing if the request failed
+function Get-PowerMetaWebPage {
+    param(
+        [string]$Url,
+        [string]$UserAgent = "",
+        [Microsoft.PowerShell.Commands.WebRequestSession]$Session = $null,
+        [int]$TimeoutSec = 60
+    )
+
+    $ProgressPreference = 'SilentlyContinue'
+    $request = @{ Uri = $Url; UseBasicParsing = $true; TimeoutSec = $TimeoutSec; ErrorAction = 'Stop' }
+    if ($UserAgent -ne "") { $request['UserAgent'] = $UserAgent }
+    if ($null -ne $Session) { $request['WebSession'] = $Session }
+
+    try
+        {
+        $response = Invoke-WebRequest @request
+        $content = $response.Content
+        if ($content -is [byte[]]) { $content = [System.Text.Encoding]::UTF8.GetString($content) }
+        return [string]$content
+        }
+    catch
+        {
+        Write-Host "[!] Request to $Url failed: $($_.Exception.Message)"
+        return $null
+        }
+}
+
+#Returns the href of every link in a page, with HTML entities such as &amp; decoded
+function Get-PowerMetaLinksFromHtml {
+    param([string]$Html)
+
+    $links = New-Object System.Collections.Generic.List[string]
+    if ($Html)
+        {
+        $pattern = '<a\s[^>]*?href\s*=\s*(?:"([^"]*)"|''([^'']*)''|([^\s>]+))'
+        foreach ($match in [regex]::Matches($Html, $pattern, 'IgnoreCase'))
+            {
+            $value = $match.Groups[1].Value + $match.Groups[2].Value + $match.Groups[3].Value
+            if ($value -ne '') { $links.Add([System.Net.WebUtility]::HtmlDecode($value)) }
+            }
+        }
+    $links
+}
+
+#Bing wraps each result as https://www.bing.com/ck/a?...&u=a1<base64url of the real address>&ntb=1
+#This returns the real address, the link unchanged if it is not wrapped, or nothing if it cannot be decoded.
+function ConvertFrom-PowerMetaBingLink {
+    param([string]$Link)
+
+    if ($Link -notmatch '^(?:https?:)?//(?:www\.)?bing\.com/ck/a\?') { return $Link }
+
+    $match = [regex]::Match($Link, '[?&]u=a1([A-Za-z0-9_\-]+)')
+    if (-not $match.Success) { return $null }
+
+    $encoded = $match.Groups[1].Value.Replace('-', '+').Replace('_', '/')
+    switch ($encoded.Length % 4)
+        {
+        2 { $encoded += '==' }
+        3 { $encoded += '=' }
+        }
+
+    try
+        {
+        return [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($encoded))
+        }
+    catch
+        {
+        return $null
+        }
+}
+
+#True if the link is an http(s) address on the domain (or one of its sub-domains)
+function Test-PowerMetaDomainLink {
+    param([string]$Link, [string]$Domain)
+
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($Link, [System.UriKind]::Absolute, [ref]$uri)) { return $false }
+    if ($uri.Scheme -ne 'http' -and $uri.Scheme -ne 'https') { return $false }
+
+    $name = $uri.Host.ToLowerInvariant()
+    $wanted = $Domain.ToLowerInvariant()
+    return ($name -eq $wanted -or $name.EndsWith('.' + $wanted, [System.StringComparison]::Ordinal))
+}
+
+#True if the link is on the domain and names a file of the wanted type.
+#".doc" must not be followed by another letter or digit, so a search for doc does not pick up docx.
+function Test-PowerMetaFileLink {
+    param([string]$Link, [string]$Domain, [string]$FileType)
+
+    if (-not (Test-PowerMetaDomainLink -Link $Link -Domain $Domain)) { return $false }
+
+    $uri = New-Object System.Uri($Link)
+    $pattern = '\.' + [regex]::Escape($FileType) + '(?![A-Za-z0-9])'
+    return [regex]::IsMatch($uri.PathAndQuery, $pattern, 'IgnoreCase')
+}
+
+#Searches Bing for "site:domain filetype:type" and returns the matching file links
+function Search-PowerMetaBing {
+    param(
+        [string]$Domain,
+        [string]$FileType,
+        [string]$UserAgent = "",
+        [int]$MaxPages = 5,
+        [int]$DelaySeconds = 2
+    )
+
+    $links = New-Object System.Collections.Generic.List[string]
+    $query = [System.Uri]::EscapeDataString("site:$Domain filetype:$FileType")
+    $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $first = 1
+    $resultsSeen = 0
+    $onDomainSeen = 0
+
+    Write-Host "[*] Searching Bing for 'site:$Domain filetype:$FileType'"
+
+    for ($page = 1; $page -le $MaxPages; $page++)
+        {
+        if ($page -gt 1 -and $DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
+
+        Write-Host "[*] Now Analyzing page $page of Bing search results"
+        $html = Get-PowerMetaWebPage -Url "https://www.bing.com/search?q=$query&first=$first" -UserAgent $UserAgent -Session $session
+        if (-not $html) { break }
+
+        #Each organic result sits in an element with class "b_algo"
+        $results = ([regex]::Matches($html, 'class="b_algo[ "]')).Count
+        $new = 0
+        foreach ($href in @(Get-PowerMetaLinksFromHtml $html))
+            {
+            $link = ConvertFrom-PowerMetaBingLink $href
+            if (-not $link) { continue }
+            if (Test-PowerMetaDomainLink -Link $link -Domain $Domain) { $onDomainSeen++ }
+            if (Test-PowerMetaFileLink -Link $link -Domain $Domain -FileType $FileType)
+                {
+                if (-not $links.Contains($link))
+                    {
+                    $links.Add($link)
+                    $new++
+                    }
+                }
+            }
+
+        $resultsSeen += $results
+
+        #No results, or nothing new: this was the last page
+        if ($results -eq 0 -or $new -eq 0) { break }
+        $first += $results
+        }
+
+    if ($resultsSeen -gt 0 -and $onDomainSeen -eq 0)
+        {
+        Write-Host "[!] Bing returned results, but none of them are on $Domain. Bing sometimes answers automated 'site:' + 'filetype:' queries with unrelated pages. Try again later or from another network."
+        }
+
+    $links
+}
+
+#Turns the last part of a link into a file name that is safe on Windows and in PowerShell
+function Get-PowerMetaFileName {
+    param([string]$Link)
+
+    $name = ''
+    $uri = $null
+    if ([System.Uri]::TryCreate($Link, [System.UriKind]::Absolute, [ref]$uri))
+        {
+        $path = $uri.AbsolutePath
+        $name = $path.Substring($path.LastIndexOf('/') + 1)
+        }
+
+    #Keep letters, digits and a few harmless symbols; everything else becomes "_"
+    $name = $name -replace '[^A-Za-z0-9._%+=@,~() \-]', '_'
+    $name = $name.Trim().TrimEnd('.', ' ')
+
+    if ($name.Length -gt 150)
+        {
+        $extension = [System.IO.Path]::GetExtension($name)
+        if ($extension.Length -gt 20) { $extension = '' }
+        $name = $name.Substring(0, 150 - $extension.Length) + $extension
+        }
+
+    if ($name -eq '' -or $name -match '^[. ]+$') { $name = 'download' }
+    if ($name -match '^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)') { $name = '_' + $name }
+    $name
+}
+
 #Function to download files from a webserver
 Function Get-TargetFiles{
         Param(
-        
+
         [Parameter(Position = 0, Mandatory = $false)]
         [array]
-        $targetlinks = "",
+        $targetlinks = @(),
 
         [Parameter(Position = 1, Mandatory = $false)]
         [string]
@@ -415,78 +517,189 @@ Function Get-TargetFiles{
 
         [Parameter(Position = 2, Mandatory = $false)]
         [string]
-        $UserAgent = "Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko"
+        $UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 
         )
-        
-        Write-Output ('[*] Downloading ' + $targetlinks.count + ' files now.')
 
+        $links = @($targetlinks | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne '' })
 
-        # Testing to see if the output directory exists. If not, we'll create it.
-        $TestOutputDir = Test-Path $OutputDir
-        If($TestOutputDir -ne $True)
+        Write-Output ('[*] Downloading ' + $links.Count + ' files now.')
+        if ($links.Count -eq 0) { return }
+
+        if ($OutputDir -eq "")
             {
-                Write-Output "[*] The output directory $OutputDir does not exist. Creating directory $OutputDir."
-                mkdir $OutputDir
+                $OutputDir = Get-Date -format yyyy-MM-dd-HHmmss
             }
 
-    # Getting the full path of the output dir.
-    $OutputPath = Convert-Path $OutputDir
-    #If the Download flag was set don't bother asking about downloading
-          ## Choose to ignore any SSL Warning issues caused by Self Signed Certificates      
-          ## Code From http://poshcode.org/624
+        # Testing to see if the output directory exists. If not, we'll create it.
+        If(-not (Test-Path -LiteralPath $OutputDir -PathType Container))
+            {
+                Write-Output "[*] The output directory $OutputDir does not exist. Creating directory $OutputDir."
+                New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+            }
+        If(-not (Test-Path -LiteralPath $OutputDir -PathType Container))
+            {
+                Write-Output "[!] The output directory $OutputDir could not be created."
+                return
+            }
 
-          ## Create a compilation environment
-          $Provider=New-Object Microsoft.CSharp.CSharpCodeProvider
-          $Compiler=$Provider.CreateCompiler()
-          $Params=New-Object System.CodeDom.Compiler.CompilerParameters
-          $Params.GenerateExecutable=$False
-          $Params.GenerateInMemory=$True
-          $Params.IncludeDebugInformation=$False
-          $Params.ReferencedAssemblies.Add("System.DLL") > $null
+        # Getting the full path of the output dir.
+        $OutputPath = Convert-Path -LiteralPath $OutputDir
 
-$TASource=@'
-  namespace Local.ToolkitExtensions.Net.CertificatePolicy {
-    public class TrustAll : System.Net.ICertificatePolicy {
-      public TrustAll() { 
-      }
-      public bool CheckValidationResult(System.Net.ServicePoint sp,
-        System.Security.Cryptography.X509Certificates.X509Certificate cert, 
-        System.Net.WebRequest req, int problem) {
+        # The progress bar makes Invoke-WebRequest very slow in Windows PowerShell
+        $ProgressPreference = 'SilentlyContinue'
+
+        # Target servers often have expired or self-signed certificates, so certificate errors are
+        # ignored while the files download - and only then. The previous setting is put back afterwards.
+        $isCore = ($PSVersionTable.PSVersion.Major -ge 6)
+        $restoreCallback = $false
+        $previousCallback = $null
+        if (-not $isCore)
+            {
+            try
+                {
+                if (-not ('PowerMetaTrustAllCertificates' -as [type]))
+                    {
+                    Add-Type -TypeDefinition @'
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
+public static class PowerMetaTrustAllCertificates {
+    private static bool Accept(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors) {
         return true;
-      }
     }
-  }
-'@ 
-          $TAResults=$Provider.CompileAssemblyFromSource($Params,$TASource)
-          $TAAssembly=$TAResults.CompiledAssembly
+    public static RemoteCertificateValidationCallback Callback = new RemoteCertificateValidationCallback(Accept);
+}
+'@
+                    }
+                $previousCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [PowerMetaTrustAllCertificates]::Callback
+                $restoreCallback = $true
+                }
+            catch
+                {
+                Write-Output "[!] Could not relax certificate checking; downloads from servers with invalid certificates will fail."
+                }
+            }
 
-          ## We now create an instance of the TrustAll and attach it to the ServicePointManager
-          $TrustAll=$TAAssembly.CreateInstance("Local.ToolkitExtensions.Net.CertificatePolicy.TrustAll")
-          [System.Net.ServicePointManager]::CertificatePolicy=$TrustAll
-  
-          ## end code from http://poshcode.org/624
+        $downloaded = 0
+        $failed = 0
+        try
+            {
+            foreach ($link in $links)
+                {
+                $uri = $null
+                if (-not [System.Uri]::TryCreate($link, [System.UriKind]::Absolute, [ref]$uri) -or ($uri.Scheme -ne 'http' -and $uri.Scheme -ne 'https'))
+                    {
+                    Write-Output "[!] Skipping $link (not an http or https link)"
+                    $failed++
+                    continue
+                    }
 
-          
-          $k = 1
-          foreach ($link in $targetlinks){
-         
-          $filename = $link -replace "^.*\/"
-          $testpath = ($OutputDir + "\" + $filename)
-          if (!(Test-Path $testpath)) 
-          {
-          Write-Output "Now Downloading $link"
-          Invoke-WebRequest $link -UserAgent $UserAgent -UseBasicParsing -OutFile ($OutputPath + "\" + $(Split-Path $link -Leaf))
-          }
-          Else{
-          #When downloading files if a file has the same name a number is prepended
-          Write-Output "Now Downloading $link"
-          Invoke-WebRequest $link -UserAgent $UserAgent -UseBasicParsing -OutFile ($OutputPath + "\" + $k + $(Split-Path $link -Leaf))
+                #When downloading files if a file has the same name a number is added to it
+                $filename = Get-PowerMetaFileName $link
+                $candidate = $filename
+                $number = 1
+                while (Test-Path -LiteralPath (Join-Path $OutputPath $candidate))
+                    {
+                    $candidate = [System.IO.Path]::GetFileNameWithoutExtension($filename) + '-' + $number + [System.IO.Path]::GetExtension($filename)
+                    $number++
+                    }
+                $destination = Join-Path $OutputPath $candidate
 
-          }
-          $k++
-          }
+                $request = @{ Uri = $link; UserAgent = $UserAgent; UseBasicParsing = $true; OutFile = $destination; TimeoutSec = 300; ErrorAction = 'Stop' }
+                if ($isCore) { $request['SkipCertificateCheck'] = $true }
 
+                Write-Output "Now Downloading $link"
+                try
+                    {
+                    Invoke-WebRequest @request
+                    $downloaded++
+                    }
+                catch
+                    {
+                    Write-Output "[!] Could not download $link : $($_.Exception.Message)"
+                    $failed++
+                    if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue }
+                    }
+                }
+            }
+        finally
+            {
+            if ($restoreCallback) { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCallback }
+            }
+
+        Write-Output "[*] Downloaded $downloaded files to $OutputPath ($failed failed)."
+}
+
+#Finds exiftool next to this script, in the current directory, or on the PATH
+function Get-PowerMetaExifTool {
+    if ($env:OS -eq 'Windows_NT') { $name = 'exiftool.exe' } else { $name = 'exiftool' }
+
+    $folders = @()
+    if ($PSScriptRoot) { $folders += $PSScriptRoot }
+    $folders += (Get-Location).Path
+
+    foreach ($folder in $folders)
+        {
+        $candidate = Join-Path $folder $name
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return (Convert-Path -LiteralPath $candidate) }
+        }
+
+    $command = Get-Command -Name exiftool -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { return $command.Path }
+    return $null
+}
+
+#ExifTool before 12.24 can be made to run code by a crafted file (CVE-2021-22204),
+#and PowerMeta runs it on files downloaded from the target. Returns $true if the copy is safe to use.
+function Test-PowerMetaExifTool {
+    param([string]$ExifToolPath)
+
+    $reported = ''
+    try { $reported = ("" + (& $ExifToolPath -ver | Select-Object -First 1)).Trim() } catch { $reported = '' }
+
+    $version = $null
+    try { $version = [version]$reported } catch { $version = $null }
+
+    if ($null -eq $version)
+        {
+        Write-Host "[!] $ExifToolPath did not report a version, so it cannot be used. On Windows the 'exiftool_files' folder must sit next to exiftool.exe. Run Install-ExifTool to get a working copy."
+        return $false
+        }
+    if ($version -lt [version]'12.24')
+        {
+        Write-Host "[!] $ExifToolPath is ExifTool $reported. Versions before 12.24 can be made to run code by a crafted file (CVE-2021-22204), so it will not be used on downloaded files. Run Install-ExifTool to get the current release."
+        return $false
+        }
+    return $true
+}
+
+#Runs exiftool and returns its output lines. ExifTool writes UTF-8, so the console encoding is switched while it runs.
+function Invoke-PowerMetaExifTool {
+    param([string]$ExifToolPath, [string[]]$Arguments)
+
+    $previousEncoding = $null
+    try
+        {
+        $previousEncoding = [Console]::OutputEncoding
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        }
+    catch
+        {
+        $previousEncoding = $null
+        }
+
+    try
+        {
+        & $ExifToolPath $Arguments
+        }
+    finally
+        {
+        if ($null -ne $previousEncoding)
+            {
+            try { [Console]::OutputEncoding = $previousEncoding } catch { }
+            }
+        }
 }
 
 #Use exiftool to extract metadata from each file
@@ -501,73 +714,225 @@ Function ExtractMetadata{
         [string]
         $ExtractAllToCsv = ""
         )
+
+        if ($OutputDir -eq "" -or -not (Test-Path -LiteralPath $OutputDir -PathType Container))
+            {
+            Write-Output "[*] $OutputDir does not exist! Canceling metadata extraction."
+            return
+            }
+
+        $exiftool = Get-PowerMetaExifTool
+        if (-not $exiftool)
+            {
+            Write-Output "[*] ExifTool was not found next to PowerMeta.ps1, in the current directory, or on the PATH. Run Install-ExifTool to download the current release, then run: ExtractMetadata -OutputDir `"$OutputDir`""
+            return
+            }
+        if (-not (Test-PowerMetaExifTool $exiftool))
+            {
+            return
+            }
+
+        $OutputPath = Convert-Path -LiteralPath $OutputDir
+        #A path that ends in a backslash would swallow the closing quote when it is passed to exiftool
+        if ($OutputPath.EndsWith('\')) { $OutputPath = $OutputPath + '.' }
+
+        #"-ext *" makes exiftool read every file, also those without a known extension
         #If "ExtractAllToCsv flag is set extract all metadata from files
         if ($ExtractAllToCsv -ne "")
-        {
-            $exifout = @()
-            if (!(Test-Path $OutputDir))
+            {
+            Write-Output "[*] Now extracting metadata from $OutputDir"
+            $csv = @(Invoke-PowerMetaExifTool -ExifToolPath $exiftool -Arguments @('-csv', '-q', '-q', '-ext', '*', $OutputPath))
+            if ($csv.Count -lt 2)
                 {
-                Write-Output "[*] $OutputDir does not exist! Canceling metadata extraction."
-                break
+                Write-Output "[*] ExifTool found no metadata in $OutputDir."
+                return
                 }
-            else{
-                $OutputPath = Convert-Path $OutputDir
-                Write-Output "[*] Now extracting metadata from $OutputDir"
-                try{
-                $exiftool = Get-ChildItem "exiftool.exe" -ErrorAction Stop
-                
-                $exifpath = $exiftool.FullName | Out-String
-                $exifpath = $exifpath -replace "`n" -replace "`r"
-                $cmd = $exifpath + " " + $OutputPath + " -CSV > $ExtractAllToCsv"
-                Invoke-Expression $cmd
-                }
-                catch
+            try
                 {
-                Write-Output "[*] Exiftool.exe was not found in the current directory! Exiting."
+                Set-Content -LiteralPath $ExtractAllToCsv -Value $csv -Encoding UTF8 -ErrorAction Stop
+                Write-Output ('[*] Metadata for ' + ($csv.Count - 1) + " files was written to $ExtractAllToCsv")
                 }
-                
-
+            catch
+                {
+                Write-Output "[!] Could not write $ExtractAllToCsv : $($_.Exception.Message)"
+                }
+            return
             }
+
+        #If we are not extracting all Metadata just get the Author and Creator for possible usernames.
+        Write-Output "[*] Now extracting metadata from $OutputDir"
+        $json = (@(Invoke-PowerMetaExifTool -ExifToolPath $exiftool -Arguments @('-j', '-q', '-q', '-Author', '-Creator', '-ext', '*', $OutputPath)) -join "`n").Trim()
+
+        $records = @()
+        if ($json -ne '')
+            {
+            try
+                {
+                $parsed = ConvertFrom-Json -InputObject $json
+                $records = @($parsed | Where-Object { $null -ne $_ })
+                }
+            catch
+                {
+                Write-Output "[!] The output of ExifTool could not be read: $($_.Exception.Message)"
+                return
+                }
+            }
+
+        $allmeta = @()
+        foreach ($record in $records)
+            {
+            foreach ($tag in @('Author', 'Creator'))
+                {
+                $property = $record.PSObject.Properties[$tag]
+                if ($null -eq $property -or $null -eq $property.Value) { continue }
+                foreach ($value in @($property.Value))
+                    {
+                    $text = ([string]$value).Trim()
+                    if ($text -ne '') { $allmeta += $text }
+                    }
+                }
+            }
+        $uniquemeta = @($allmeta | Sort-Object -Unique)
+
+        Write-Output ('[*] ExifTool read ' + $records.Count + ' files.')
+        Write-Output "`n[*] Extracted 'Author' and 'Creator' metadata"
+        if ($uniquemeta.Count -eq 0)
+            {
+            Write-Output "[*] No 'Author' or 'Creator' metadata was found."
+            }
+        else
+            {
+            $uniquemeta
+            }
+        Write-Output "`n"
+}
+
+#SHA-256 of a file as lower-case hex
+function Get-PowerMetaSha256 {
+    param([string]$Path)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try
+        {
+        $bytes = $sha.ComputeHash($stream)
         }
-        else{
-            #If we are not extracting all Metadata just get the Author and Creator for possible usernames.
-                if (!(Test-Path $OutputDir))
+    finally
+        {
+        $stream.Dispose()
+        $sha.Dispose()
+        }
+    ([System.BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
+}
+
+#Downloads the current official ExifTool for Windows and unpacks it next to this script
+Function Install-ExifTool{
+
+    <#
+    .SYNOPSIS
+    Downloads the current official ExifTool package for Windows, checks it against the SHA-256 checksum published on exiftool.org, and unpacks exiftool.exe and its exiftool_files folder next to PowerMeta.ps1.
+
+    .PARAMETER Destination
+    The folder to install into. Defaults to the folder PowerMeta.ps1 is in.
+
+    .Example
+
+    C:\PS> Install-ExifTool
+    #>
+
+        Param(
+
+        [Parameter(Position = 0, Mandatory = $false)]
+        [string]
+        $Destination = ""
+        )
+
+        if ($env:OS -ne 'Windows_NT')
+            {
+            Write-Output "[*] Install-ExifTool is for Windows. On Linux or macOS install ExifTool with your package manager, for example 'apt install libimage-exiftool-perl' or 'brew install exiftool'."
+            return
+            }
+
+        if ($Destination -eq "")
+            {
+            if ($PSScriptRoot) { $Destination = $PSScriptRoot } else { $Destination = (Get-Location).Path }
+            }
+        if (-not (Test-Path -LiteralPath $Destination -PathType Container))
+            {
+            New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+            }
+        $Destination = Convert-Path -LiteralPath $Destination
+
+        $ProgressPreference = 'SilentlyContinue'
+        #A plain agent name: the download mirror answers browser-like agents with a web page instead of the file
+        $agent = 'PowerMeta'
+        $work = Join-Path ([System.IO.Path]::GetTempPath()) ('powermeta-exiftool-' + [System.Guid]::NewGuid().ToString('N'))
+
+        try
+            {
+            $version = ("" + (Get-PowerMetaWebPage -Url 'https://exiftool.org/ver.txt' -UserAgent $agent)).Trim()
+            if ($version -notmatch '^\d+\.\d+$')
                 {
-                Write-Output "[*] $OutputDir does not exist! Canceling metadata extraction."
-                break
+                Write-Output "[!] Could not read the current ExifTool version from https://exiftool.org/ver.txt. Nothing was installed."
+                return
                 }
-                else{
-                $OutputPath = Convert-Path $OutputDir
-                $filearray = Get-ChildItem $OutputPath
-                $output = @()
-                try{
-                $exiftool = Get-ChildItem "exiftool.exe" -ErrorAction Stop
-                $exifpath = $exiftool.FullName | Out-String
-                $exifpath = $exifpath -replace "`n" -replace "`r"
-                ForEach ($file in $filearray) {
-                $filepath = $OutputPath + "\" + $file
-                Write-Output "[*] Now extracting metadata from $filepath"
-                
 
-                $cmd = $exifpath + " " + $filepath + " -CSV -Author -Creator" 
-                $exifout = Invoke-Expression $cmd | Out-String
-                $strippedout = $exifout -replace "SourceFile" -replace "Author" -replace "Creator" -replace "`n" -replace "`r"
-                $modpath = $OutputPath -replace "\\", "\/"
-                $output += $strippedout -replace "^.*$file,"
-                }
-                $allmeta = @()
-                $allmeta += $output -split ","
-                $uniquemeta = $allmeta | sort | unique
+            if ([System.Environment]::Is64BitOperatingSystem) { $bits = '64' } else { $bits = '32' }
+            $package = "exiftool-${version}_$bits"
+            $zipName = "$package.zip"
 
-                Write-Output "`n[*] Extracted 'Author' and 'Creator' metadata"
-                $uniquemeta
-                Write-Output "`n"
-                }
-                catch
+            $checksums = "" + (Get-PowerMetaWebPage -Url 'https://exiftool.org/checksums.txt' -UserAgent $agent)
+            $match = [regex]::Match($checksums, 'SHA2-256\(' + [regex]::Escape($zipName) + '\)\s*=\s*([0-9a-fA-F]{64})')
+            if (-not $match.Success)
                 {
-                Write-Output "[*] Exiftool.exe was not found in the current directory! Exiting."                
+                Write-Output "[!] No SHA-256 checksum for $zipName is listed on https://exiftool.org/checksums.txt. Nothing was installed."
+                return
+                }
+            $expected = $match.Groups[1].Value.ToLowerInvariant()
+
+            New-Item -ItemType Directory -Path $work -Force | Out-Null
+            $zipPath = Join-Path $work $zipName
+            Write-Output "[*] Downloading ExifTool $version ($zipName)"
+            Invoke-WebRequest -Uri "https://sourceforge.net/projects/exiftool/files/$zipName/download" -UserAgent $agent -UseBasicParsing -OutFile $zipPath -TimeoutSec 600 -ErrorAction Stop
+
+            $actual = Get-PowerMetaSha256 $zipPath
+            if ($actual -ne $expected)
+                {
+                Write-Output "[!] The download does not match the checksum published on exiftool.org (expected $expected, got $actual). Nothing was installed."
+                return
+                }
+            Write-Output "[*] Checksum verified."
+
+            $unpacked = Join-Path $work 'unpacked'
+            try { Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop } catch { }
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $unpacked)
+
+            #The package holds "exiftool(-k).exe", which must be renamed to exiftool.exe for command-line use, and "exiftool_files"
+            $launcher = Join-Path (Join-Path $unpacked $package) 'exiftool(-k).exe'
+            $files = Join-Path (Join-Path $unpacked $package) 'exiftool_files'
+            if (-not (Test-Path -LiteralPath $launcher -PathType Leaf) -or -not (Test-Path -LiteralPath $files -PathType Container))
+                {
+                Write-Output "[!] The ExifTool package does not have the expected layout. Nothing was installed."
+                return
                 }
 
+            $targetFiles = Join-Path $Destination 'exiftool_files'
+            if (Test-Path -LiteralPath $targetFiles)
+                {
+                Write-Output "[*] Replacing the existing $targetFiles"
+                Remove-Item -LiteralPath $targetFiles -Recurse -Force
                 }
+            Copy-Item -LiteralPath $files -Destination $targetFiles -Recurse -Force
+            Copy-Item -LiteralPath $launcher -Destination (Join-Path $Destination 'exiftool.exe') -Force
+
+            Write-Output "[*] ExifTool $version was installed to $Destination"
+            }
+        catch
+            {
+            Write-Output "[!] ExifTool could not be installed: $($_.Exception.Message)"
+            }
+        finally
+            {
+            if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
             }
 }
