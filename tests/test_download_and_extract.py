@@ -416,11 +416,15 @@ class CommandLine(TemporaryFolder):
     """The whole run against a local stand-in: the target site is 127.0.0.1, and the same server answers
     as the Internet Archive's index, as Bing and as DuckDuckGo."""
 
+    bing_keeps_to_site = True
+
     def respond(self, request):
         base = self.server.url
         if request.path == "/cdx":
             return (200, "%s/files/report.pdf 20200101000000\n%s/gone.pdf 20190101000000\n" % (base, base), {"Content-Type": "text/plain"})
         if request.path == "/bing":
+            if "first" not in request.query:  # the search for the site alone
+                return (200, bing_page([base + "/"] if self.bing_keeps_to_site else ["http://other.example/", "http://unrelated.example/a.pdf"]))
             if request.query["q"][0].endswith("filetype:pdf") and request.query["first"][0] == "1":
                 return (200, bing_page([base + "/files/report.pdf", base + "/files/second.pdf"]))
             return (200, bing_page([]))
@@ -455,7 +459,8 @@ class CommandLine(TemporaryFolder):
         self.assertIn("[*] A total of 3 files were discovered.", output)
         # DuckDuckGo refused once and was not asked again for the second file type
         self.assertEqual(sum(1 for request in server.requests if request.path == "/ddg"), 1)
-        self.assertEqual(sum(1 for request in server.requests if request.path == "/bing"), 3)
+        # Bing: once for the site alone, two pages for pdf, one for docx
+        self.assertEqual(sum(1 for request in server.requests if request.path == "/bing"), 4)
         self.assertEqual(sum(1 for request in server.requests if request.path == "/cdx"), 1)
         self.assertEqual(sorted(os.listdir(out)), ["gone.pdf", "report.pdf", "second.pdf"])
         self.assertIn("Trying the copy in the Internet Archive", output)
@@ -492,19 +497,24 @@ class CommandLine(TemporaryFolder):
     def test_engines_searched_in_the_browser_are_not_also_asked_with_plain_requests(self):
         from powermeta import browser
 
-        calls = []
+        calls, options = [], {}
 
-        def fake_search(engines, domain, file_types, max_pages, delay, browser_name, log, on_link=None):
+        def fake_search(engines, domain, file_types, max_pages, delay, browser_name, log, on_link=None, **more):
             calls.append((list(engines), domain, list(file_types), browser_name))
+            options.update(more)
             # The browser finds today's https address of a file the Archive lists under http
             return ["https://127.0.0.1:%d/files/report.pdf" % self.server.port, "http://127.0.0.1:%d/files/browser-only.pdf" % self.server.port]
 
         with patched(browser, search=fake_search):
             code, output, server = self.run_with_server(
-                ["-d", "127.0.0.1", "-t", "pdf", "--delay", "0", "--browser", "google,bing", "--browser-name", "edge", "--list-out", os.path.join(self.folder, "l.txt")]
+                [
+                    "-d", "127.0.0.1", "-t", "pdf", "--delay", "0", "--browser", "google,bing", "--browser-name", "edge",
+                    "--list-out", os.path.join(self.folder, "l.txt"), "--google-lookup", "request", "--save-pages", os.path.join(self.folder, "pages"),
+                ]
             )
         self.assertEqual(code, 0, output)
         self.assertEqual(calls, [(["google", "bing"], "127.0.0.1", ["pdf"], "edge")])
+        self.assertEqual(options, {"lookup": "request", "user_agent": None, "save_pages": os.path.join(self.folder, "pages")})
         paths = [request.path for request in server.requests]
         # Bing went through the browser, so only DuckDuckGo and the Archive were asked with plain requests
         self.assertNotIn("/bing", paths)
@@ -518,11 +528,23 @@ class CommandLine(TemporaryFolder):
             sorted(["https://127.0.0.1:%d/files/report.pdf" % server.port, "http://127.0.0.1:%d/files/browser-only.pdf" % server.port, "http://127.0.0.1:%d/gone.pdf" % server.port]),
         )
 
+    def test_bing_is_not_asked_for_files_when_it_does_not_keep_to_the_site(self):
+        self.bing_keeps_to_site = False
+        with patched(cli.sys, stdin=io.StringIO("")):
+            code, output, server = self.run_with_server(["-d", "127.0.0.1", "-t", "pdf, docx", "--delay", "0"])
+        self.assertEqual(code, 0, output)
+        self.assertIn("with pages of other sites only", output)
+        self.assertEqual(sum(1 for request in server.requests if request.path == "/bing"), 1)
+        # The Internet Archive's files are still there, and nothing of another site was kept
+        self.assertIn("[*] A total of 2 files were discovered.", output)
+
     def test_bad_input_is_explained(self):
         self.assertEqual(run_cli(["-d", "not a domain"])[0], 1)
         self.assertIn("No file types", run_cli(["-d", "example.com", "-t", "p df"])[1])
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.main(["-d", "example.com", "--sources", "altavista"])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.main(["-d", "example.com", "--google-lookup", "guess"])
         errors = io.StringIO()
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(errors):
             cli.main(["--download"])

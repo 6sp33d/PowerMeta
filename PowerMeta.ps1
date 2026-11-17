@@ -173,6 +173,8 @@ Function Invoke-PowerMeta{
     $archiveCopies = New-Object System.Collections.Hashtable
 
     #If no target file list was provided we will perform searches and craft one.
+    $filetypearray = @(Get-PowerMetaFileTypeList $FileTypes)
+
     If ($TargetFileList -eq "")
         {
             $domain = Get-PowerMetaHostName $TargetDomain
@@ -182,7 +184,6 @@ Function Invoke-PowerMeta{
                 return
                 }
 
-            $filetypearray = @(Get-PowerMetaFileTypeList $FileTypes)
             if ($filetypearray.Count -eq 0)
                 {
                 Write-Output "[!] No file types to search for. Pass a comma separated list such as `"pdf, docx`"."
@@ -293,7 +294,7 @@ Function Invoke-PowerMeta{
 
     If ($Download)
     {
-        Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent -ArchiveCopies $archiveCopies
+        Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent -ArchiveCopies $archiveCopies -FileTypes $filetypearray
     }
     else
         {
@@ -311,7 +312,7 @@ Function Invoke-PowerMeta{
                 {
                  0 {
                     "[*] Now downloading the files."
-                    Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent -ArchiveCopies $archiveCopies
+                    Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent -ArchiveCopies $archiveCopies -FileTypes $filetypearray
                    }
                  1 {"[*] No files will be downloaded."}
                 }
@@ -807,21 +808,54 @@ function Search-PowerMetaArchive {
     $entries
 }
 
-#Turns the last part of a link into a file name that is safe on Windows and in PowerShell
+#Turns the last part of a link into a file name that is safe on Windows and in PowerShell.
+#A name with an ending always ends in one of the wanted file types. The site must not be able to choose
+#another one: a download saved as setup.exe or run.bat could be started by mistake. So
+#get.php?file=report.pdf is saved as get.php.pdf, and a link that names no wanted type gets ".download" added.
 function Get-PowerMetaFileName {
-    param([string]$Link)
+    param([string]$Link, [string[]]$FileTypes = @())
+
+    if ($null -eq $FileTypes -or $FileTypes.Count -eq 0) { $FileTypes = @('pdf', 'docx', 'xlsx', 'doc', 'xls', 'pptx', 'ppt') }
 
     $name = ''
+    $pathAndQuery = ''
     $uri = $null
     if ([System.Uri]::TryCreate($Link, [System.UriKind]::Absolute, [ref]$uri))
         {
         $path = $uri.AbsolutePath
         $name = $path.Substring($path.LastIndexOf('/') + 1)
+        $pathAndQuery = $uri.PathAndQuery
         }
 
     #Keep letters, digits and a few harmless symbols; everything else becomes "_"
     $name = $name -replace '[^A-Za-z0-9._%+=@,~() \-]', '_'
     $name = $name.Trim().TrimEnd('.', ' ')
+
+    $ending = ''
+    $dot = $name.LastIndexOf('.')
+    if ($dot -ge 0) { $ending = $name.Substring($dot + 1).ToLowerInvariant() }
+    if ($FileTypes -notcontains $ending)
+        {
+        #The type that made the link a wanted one, if it names one (get.php?file=report.pdf)
+        $named = ''
+        foreach ($type in $FileTypes)
+            {
+            if ([regex]::IsMatch($pathAndQuery, ('\.' + [regex]::Escape($type) + '(?![A-Za-z0-9])'), 'IgnoreCase'))
+                {
+                $named = $type
+                break
+                }
+            }
+        if ($named -ne '')
+            {
+            if ($name -eq '') { $name = 'download' }
+            $name = $name + '.' + $named
+            }
+        elseif ($dot -ge 0)
+            {
+            $name = $name + '.download'
+            }
+        }
 
     if ($name.Length -gt 150)
         {
@@ -831,7 +865,8 @@ function Get-PowerMetaFileName {
         }
 
     if ($name -eq '' -or $name -match '^[. ]+$') { $name = 'download' }
-    if ($name -match '^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)') { $name = '_' + $name }
+    #Windows device names, also when spaces come before the dot ("nul .pdf")
+    if ($name -match '^(con|prn|aux|nul|com[0-9]|lpt[0-9]) *(\.|$)') { $name = '_' + $name }
 
     #A download must never be taken for ExifTool itself, for its configuration file (.ExifTool_config),
     #or for a command-line option (a name that starts with "-")
@@ -897,7 +932,12 @@ Function Get-TargetFiles{
         #It is used when a file can no longer be downloaded from the site itself.
         [Parameter(Mandatory = $false)]
         [System.Collections.IDictionary]
-        $ArchiveCopies = $null
+        $ArchiveCopies = $null,
+
+        #Optional: the wanted file types. Every saved file gets a name that ends in one of them.
+        [Parameter(Mandatory = $false)]
+        [string[]]
+        $FileTypes = @()
 
         )
 
@@ -976,7 +1016,7 @@ public static class PowerMetaTrustAllCertificates {
                     }
 
                 #When downloading files if a file has the same name a number is added to it
-                $filename = Get-PowerMetaFileName $link
+                $filename = Get-PowerMetaFileName -Link $link -FileTypes $FileTypes
                 $candidate = $filename
                 $number = 1
                 while (Test-Path -LiteralPath (Join-Path $OutputPath $candidate))
@@ -1098,6 +1138,26 @@ function Invoke-PowerMetaExifTool {
         }
 }
 
+#A spreadsheet program runs a cell that starts with = + - or @ as a formula, and the metadata comes from
+#downloaded files. Such a cell gets an apostrophe in front, which makes it plain text. Plain numbers such
+#as -5 or +0.3 are left as they are. Takes the whole CSV text (lines joined with a line feed) and returns it.
+function ConvertTo-PowerMetaInertCsv {
+    param([string]$Text)
+
+    #One cell and what ends it: a quoted cell (quotes inside it are doubled) or a plain one, then a comma,
+    #a line feed or the end of the text
+    $cellPattern = '\G(?:"(?<q>(?:[^"]|"")*)"|(?<u>[^,\n]*))(?<d>,|\n|\z)'
+    $makeInert = [System.Text.RegularExpressions.MatchEvaluator] {
+        param($found)
+        $quoted = $found.Groups['q'].Success
+        if ($quoted) { $cell = $found.Groups['q'].Value } else { $cell = $found.Groups['u'].Value }
+        if ($cell -match '^[=+\-@\t\r\n]' -and $cell -notmatch '^[+-]?[0-9]+([.,][0-9]+)?\z') { $cell = "'" + $cell }
+        if ($quoted) { $cell = '"' + $cell + '"' }
+        $cell + $found.Groups['d'].Value
+    }
+    [regex]::Replace($Text, $cellPattern, $makeInert)
+}
+
 #Use exiftool to extract metadata from each file
 Function ExtractMetadata{
         Param(
@@ -1144,6 +1204,8 @@ Function ExtractMetadata{
                 }
             try
                 {
+                #Cells that a spreadsheet program would run as a formula are made plain text
+                $csv = @((ConvertTo-PowerMetaInertCsv -Text ($csv -join "`n")) -split "`n")
                 Set-Content -LiteralPath $ExtractAllToCsv -Value $csv -Encoding UTF8 -ErrorAction Stop
                 Write-Output ('[*] Metadata for ' + ($csv.Count - 1) + " files was written to $ExtractAllToCsv")
                 }

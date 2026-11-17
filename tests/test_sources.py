@@ -33,8 +33,33 @@ class Bing(unittest.TestCase):
                 log = Messages()
                 found = sources.search_bing(Fetcher(), "nasa.gov", "pdf", delay=0, log=log)
         self.assertEqual(found, [])
-        self.assertIn("none of them are on nasa.gov", log.text())
+        self.assertIn("Bing showed pages of other sites only for this search", log.text())
         self.assertEqual(len(server.requests), 1)
+
+    def test_bing_is_first_asked_for_the_site_alone(self):
+        # A search for "site:domain" has to return pages of that domain. Bing answers some searches
+        # with pages that have nothing to do with them, and then the file searches would bring up
+        # other sites only.
+        answers = {
+            "keeps to the site": (200, fixture("bing_results.html")),
+            "other sites only": (200, fixture("bing_unrelated.html")),
+            "nothing": (200, bing_page([])),
+            "error": (429, "slow down"),
+        }
+        expected = {
+            "keeps to the site": (True, "to see whether it keeps to the site"),
+            "other sites only": (False, "with pages of other sites only"),
+            "nothing": (False, "Bing has no pages of legislature.mi.gov"),
+            "error": (False, "Bing did not answer (HTTP 429"),
+        }
+        for name, answer in answers.items():
+            with LocalServer(lambda request: answer) as server:
+                with patched(sources, BING_URL=server.url + "/search"):
+                    log = Messages()
+                    known = sources.bing_knows_site(Fetcher(), "legislature.mi.gov", log)
+            self.assertEqual(known, expected[name][0], name)
+            self.assertIn(expected[name][1], log.text(), name)
+            self.assertEqual([request.query for request in server.requests], [{"q": ["site:legislature.mi.gov"]}], name)
 
     def test_follows_pages_up_to_the_limit(self):
         pages = {

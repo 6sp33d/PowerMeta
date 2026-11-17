@@ -396,7 +396,7 @@ if ($doDownload) {
         $OutputDir = Get-Date -Format "yyyy-MM-dd-HHmmss"
     }
     Write-Host "[*] Now downloading the files."
-    Get-TargetFiles -targetlinks $uniqueResults -OutputDir $OutputDir -UserAgent $UserAgent
+    Get-TargetFiles -targetlinks $uniqueResults -OutputDir $OutputDir -UserAgent $UserAgent -FileTypes $fileTypeArray
 }
 else {
     Write-Host "[*] No files will be downloaded."

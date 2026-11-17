@@ -72,6 +72,38 @@ def search_archive(fetcher, domain, file_types, max_results=10000, log=print):
     return entries
 
 
+BING_OTHER_SITES = (
+    "[!] Bing answered the search for '%s' with pages of other sites only. It does this when it takes a "
+    "search for an automated one, or does not know the site. Nothing from such an answer is kept, and "
+    "Bing is left out for the rest of this run."
+)
+
+
+def bing_knows_site(fetcher, domain, log=print):
+    """Ask Bing for the site alone before asking for file types.
+
+    Bing answers some searches with pages that have nothing to do with them: when it does not know the
+    site, and when it takes the search for an automated one. A search for "site:domain" must return pages
+    of that domain; if it returns none, the searches for file types would only bring up other sites.
+    Returns False (after saying so) if Bing is to be left out.
+    """
+    query = "site:%s" % domain
+    log("[*] Asking Bing for '%s', to see whether it keeps to the site" % query)
+    try:
+        page = fetcher.get(BING_URL + "?" + urllib.parse.urlencode({"q": query}))
+    except FetchError as error:
+        log("[!] Bing did not answer (%s). It is left out for the rest of this run." % error)
+        return False
+    on_domain = sum(1 for href in links.links_from_html(page.text) if links.is_on_domain(links.unwrap_bing(href) or "", domain))
+    if on_domain:
+        return True
+    if links.count_bing_results(page.text):
+        log(BING_OTHER_SITES % query)
+    else:
+        log("[*] Bing has no pages of %s. It is left out for the rest of this run." % domain)
+    return False
+
+
 def search_bing(fetcher, domain, file_type, max_pages=5, delay=2, log=print):
     """Search Bing for "site:domain filetype:type" and return the matching file links."""
     found = []
@@ -99,13 +131,9 @@ def search_bing(fetcher, domain, file_type, max_pages=5, delay=2, log=print):
             break
         first += results
 
-    # Bing fills the page with other sites when it has little or nothing on the site for a query, and it
-    # has also been seen doing so for automated queries. The two cannot be told apart from one answer.
+    # Bing fills the page with other sites when it has nothing on the site for a search
     if results_seen > 0 and on_domain_seen == 0:
-        log(
-            "[!] Bing returned results, but none of them are on %s. It does this when it has little or nothing "
-            "on the site for a search, and sometimes for automated searches." % domain
-        )
+        log("[*] Bing showed pages of other sites only for this search, so it has no %s files of %s." % (file_type, domain))
     log("[*] Bing: %d %s files found" % (len(found), file_type))
     return found
 

@@ -131,9 +131,23 @@ Assert-Equal 'Query string is dropped' (Get-PowerMetaFileName 'https://example.c
 Assert-Equal 'Missing name becomes download' (Get-PowerMetaFileName 'https://example.com/a/') 'download'
 Assert-Equal 'PowerShell syntax in a name is defused' (Get-PowerMetaFileName 'https://example.com/x/$(calc);.pdf') '_(calc)_.pdf'
 Assert-Equal 'Reserved device name is changed' (Get-PowerMetaFileName 'https://example.com/con.pdf') '_con.pdf'
-Assert-Equal 'A download cannot be named like ExifTool' (Get-PowerMetaFileName 'https://example.com/a.pdf/exiftool.exe') '_exiftool.exe'
-Assert-Equal 'A download cannot be named like the ExifTool configuration file' (Get-PowerMetaFileName 'https://example.com/x/.ExifTool_config') '_.ExifTool_config'
+Assert-Equal 'A download cannot be named like ExifTool' (Get-PowerMetaFileName 'https://example.com/a.pdf/exiftool.exe') '_exiftool.exe.pdf'
+Assert-Equal 'A download cannot be named like the ExifTool configuration file' (Get-PowerMetaFileName 'https://example.com/x/.ExifTool_config') '_.ExifTool_config.download'
+Assert-Equal 'The site does not choose the ending: a program' (Get-PowerMetaFileName 'https://example.com/files/setup.exe?doc=.pdf') 'setup.exe.pdf'
+Assert-Equal 'The site does not choose the ending: a script' (Get-PowerMetaFileName 'https://example.com/files/run.bat?x.pdf') 'run.bat.pdf'
+Assert-Equal 'The site does not choose the ending: a shortcut' (Get-PowerMetaFileName 'https://example.com/files/report.pdf.lnk') 'report.pdf.lnk.pdf'
+Assert-Equal 'A file named in the query string gets its type' (Get-PowerMetaFileName 'https://example.com/get.php?file=annual.docx&x=1') 'get.php.docx'
+Assert-Equal 'A name without a wanted type is marked' (Get-PowerMetaFileName 'https://example.com/files/tool.ps1') 'tool.ps1.download'
+Assert-Equal 'A name without any ending is kept' (Get-PowerMetaFileName 'https://example.com/files/readme') 'readme'
+Assert-Equal 'An upper-case ending is a wanted one too' (Get-PowerMetaFileName 'https://example.com/files/REPORT.PDF') 'REPORT.PDF'
+Assert-Equal 'The wanted types are those that were asked for' (Get-PowerMetaFileName -Link 'https://example.com/a.pdf?as=b.odt' -FileTypes @('odt')) 'a.pdf.odt'
 Assert-Equal 'A download cannot look like a command-line option' (Get-PowerMetaFileName 'https://example.com/x/-o.pdf') '_-o.pdf'
+
+# Cells a spreadsheet program would run as a formula
+$csvIn = (@('SourceFile,Author,Comment', 'a.pdf,=1+1,"@SUM(A1), ""quoted"""', 'b.pdf,-5,"two', 'lines, one cell"', 'c.pdf,+0.3,-1+cmd') -join "`n")
+$csvOut = (@('SourceFile,Author,Comment', "a.pdf,'=1+1,`"'@SUM(A1), `"`"quoted`"`"`"", 'b.pdf,-5,"two', 'lines, one cell"', "c.pdf,+0.3,'-1+cmd") -join "`n")
+Assert-Equal 'Formula cells in the CSV are made plain text, numbers and other cells are kept' (ConvertTo-PowerMetaInertCsv -Text $csvIn) $csvOut
+Assert-Equal 'An empty CSV stays empty' (ConvertTo-PowerMetaInertCsv -Text '') ''
 
 Write-Host ""
 Write-Host "Metadata extraction"

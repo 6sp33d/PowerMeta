@@ -74,6 +74,40 @@ class _WebRedirectsOnly(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Leaves a redirect unfollowed, so that the answer itself can be looked at."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def redirect_target(url, user_agent=PROGRAM_USER_AGENT, timeout=30):
+    """Ask for an address and report where the answer points to, without going there.
+
+    Returns (HTTP status, the address the answer redirects to or None). Raises FetchError if there is
+    no answer.
+    """
+    try:
+        url = plain_ascii(url.strip())
+        if urllib.parse.urlsplit(url).scheme.lower() not in ("http", "https"):
+            raise FetchError("not an http or https link")
+        request = urllib.request.Request(url)
+        if user_agent:
+            request.add_header("User-Agent", user_agent)
+        opener = urllib.request.build_opener(_NoRedirects())
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                return response.status, None
+        except urllib.error.HTTPError as error:
+            status, location = error.code, error.headers.get("Location") if error.headers else None
+            error.close()
+            if status in (301, 302, 303, 307, 308) and location:
+                return status, urllib.parse.urljoin(url, location.strip())
+            return status, None
+    except _REQUEST_ERRORS as error:
+        raise FetchError(_reason(error))
+
+
 def _expected_length(response):
     """The number of bytes the server announced, or None if it did not say."""
     if "chunked" in (response.headers.get("Transfer-Encoding") or "").lower():

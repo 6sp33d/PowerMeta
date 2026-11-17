@@ -55,7 +55,8 @@ def _name_list(text, allowed, option, parser):
     return names
 
 
-def find_files(domain, file_types, http_sources, browser_engines, user_agent=None, max_pages=5, delay=2, browser_name="chrome"):
+def find_files(domain, file_types, http_sources, browser_engines, user_agent=None, max_pages=5, delay=2,
+               browser_name="chrome", google_lookup="click", save_pages=None):
     """Ask every chosen source.
 
     Returns (sorted links, {link: address of the Internet Archive's copy}, interrupted). interrupted is
@@ -84,6 +85,11 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
         engines = [name for name in ("bing", "duckduckgo") if name in http_sources and name not in browser_engines]
         duckduckgo_blocked = False
         first = True
+        # Bing is first asked for the site alone. If it does not keep to the site, it is not asked for files.
+        if "bing" in engines:
+            first = False
+            if not sources.bing_knows_site(Fetcher(user_agent or DEFAULT_USER_AGENT), domain, log):
+                engines.remove("bing")
         for file_type in file_types:
             ask_bing = "bing" in engines
             ask_duckduckgo = "duckduckgo" in engines and not duckduckgo_blocked
@@ -109,7 +115,11 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
             from . import browser
 
             # Each link is handed over as soon as it is found, so that nothing is lost if the search is cut short
-            for link in browser.search(browser_engines, domain, file_types, max_pages, delay, browser_name, log, on_link=keep):
+            found_in_browser = browser.search(
+                browser_engines, domain, file_types, max_pages, delay, browser_name, log, on_link=keep,
+                lookup=google_lookup, user_agent=user_agent, save_pages=save_pages,
+            )
+            for link in found_in_browser:
                 keep(link)
     except KeyboardInterrupt:
         interrupted = True
@@ -278,10 +288,19 @@ def build_parser():
     parser.add_argument(
         "--browser", nargs="?", const=",".join(BROWSER_ENGINES), default="", metavar="ENGINES",
         help="also search in a visible browser window that you can use to answer any check the search engine "
-        "shows: google, bing, duckduckgo (all three if no list is given). Needs 'pip install selenium'. "
-        "To read where a Google result leads, the browser opens the result's link.",
+        "shows: google, bing, duckduckgo (all three if no list is given). Needs 'pip install selenium'.",
     )
     parser.add_argument("--browser-name", choices=("chrome", "edge"), default="chrome", help="the browser to open (default: %(default)s)")
+    parser.add_argument(
+        "--google-lookup", choices=("click", "request", "off"), default="click",
+        help="Google's results do not show their address. How to read it: click = click each result in the "
+        "browser window (default); request = ask Google's link with a plain web request, without the browser "
+        "(Google's robots.txt asks programs not to do that); off = leave such results out",
+    )
+    parser.add_argument(
+        "--save-pages", metavar="DIR", default="",
+        help="with --browser: keep a copy of every page that is read in DIR, for troubleshooting",
+    )
     parser.add_argument("--extract-dir", metavar="DIR", default="", help="only extract metadata from the files in DIR")
     parser.add_argument("--install-exiftool", action="store_true", help="Windows: download the current ExifTool and put it next to PowerMeta")
     parser.add_argument("--version", action="version", version="PowerMeta (Python) " + __version__)
@@ -353,7 +372,8 @@ def _run(argv):
                 return 1
 
         file_links, archive_copies, interrupted = find_files(
-            domain, file_types, http_sources, browser_engines, args.user_agent or None, args.max_pages, args.delay, args.browser_name
+            domain, file_types, http_sources, browser_engines, args.user_agent or None, args.max_pages, args.delay,
+            args.browser_name, args.google_lookup, args.save_pages or None,
         )
         log("[*] A total of %d files were discovered." % len(file_links))
         log()
