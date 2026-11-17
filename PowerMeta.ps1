@@ -187,8 +187,13 @@ Function Invoke-PowerMeta{
 
             $validlinks = New-Object System.Collections.Generic.List[string]
             $duckDuckGoBlocked = $false
+            $firstFileType = $true
             foreach ($filetype in $filetypearray)
                 {
+                #The pause also applies between the last request for one file type and the first for the next
+                if (-not $firstFileType -and $SearchDelay -gt 0) { Start-Sleep -Seconds $SearchDelay }
+                $firstFileType = $false
+
                 $found = @()
 
                 if ($SearchEngines -contains 'Bing')
@@ -217,7 +222,7 @@ Function Invoke-PowerMeta{
             If ($OutputList -ne "" -and $targetlinks.Count -gt 0)
                 {
                 Write-Output "[*] Writing links to a file at $OutputList"
-                $targetlinks | Out-File -Encoding ascii $OutputList
+                $targetlinks | Out-File -LiteralPath $OutputList -Encoding ascii
                 }
 
         }
@@ -345,7 +350,7 @@ function Get-PowerMetaWebPage {
     param(
         [string]$Url,
         [string]$UserAgent = "",
-        [Microsoft.PowerShell.Commands.WebRequestSession]$Session = $null,
+        $Session = $null,
         [int]$TimeoutSec = 60,
         [string]$Method = 'Get',
         [hashtable]$Body = $null
@@ -431,6 +436,13 @@ function ConvertFrom-PowerMetaDuckDuckGoLink {
 
     $decoded = [System.Uri]::UnescapeDataString($match.Groups[1].Value)
     if ($decoded -notmatch '^https?://') { return $null }
+
+    #Keep the address in plain ASCII, the way search engines normally give it, so that it survives being written to a list
+    if ($decoded -match '[^\x20-\x7E]')
+        {
+        $uri = $null
+        if ([System.Uri]::TryCreate($decoded, [System.UriKind]::Absolute, [ref]$uri)) { $decoded = $uri.AbsoluteUri }
+        }
     return $decoded
 }
 
@@ -586,7 +598,16 @@ function Search-PowerMetaDuckDuckGo {
 
         Write-Host "[*] Now Analyzing page $page of DuckDuckGo search results"
         $html = Get-PowerMetaWebPage -Url 'https://html.duckduckgo.com/html/' -Method 'Post' -Body $body -UserAgent $UserAgent -Session $session
-        if (-not $html) { break }
+        if (-not $html)
+            {
+            #No answer to the first request (an error status or a network failure): leave DuckDuckGo alone for the rest of the run
+            if ($page -eq 1)
+                {
+                Write-Host "[!] DuckDuckGo did not answer the search. It is skipped for the rest of this run."
+                if ($null -ne $Blocked) { $Blocked.Value = $true }
+                }
+            break
+            }
 
         #Each result title is a link with class "result__a"
         $results = ([regex]::Matches($html, 'class="result__a"')).Count
@@ -672,6 +693,10 @@ function Get-PowerMetaFileName {
 
     if ($name -eq '' -or $name -match '^[. ]+$') { $name = 'download' }
     if ($name -match '^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)') { $name = '_' + $name }
+
+    #A download must never be taken for ExifTool itself, for its configuration file (.ExifTool_config),
+    #or for a command-line option (a name that starts with "-")
+    if ($name -match '^([.\-]|exiftool)') { $name = '_' + $name }
     $name
 }
 
@@ -778,19 +803,27 @@ public static class PowerMetaTrustAllCertificates {
                     }
                 $destination = Join-Path $OutputPath $candidate
 
-                $request = @{ Uri = $link; UserAgent = $UserAgent; UseBasicParsing = $true; OutFile = $destination; TimeoutSec = 300; ErrorAction = 'Stop' }
+                #Windows PowerShell reads -OutFile as a wildcard pattern, so an output folder with [ or ] in its
+                #path would make every download fail. Such files are fetched to a temporary name and then moved.
+                $target = $destination
+                $viaTemp = [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($destination)
+                if ($viaTemp) { $target = Join-Path ([System.IO.Path]::GetTempPath()) ('powermeta-' + [System.Guid]::NewGuid().ToString('N') + '.tmp') }
+
+                $request = @{ Uri = $link; UserAgent = $UserAgent; UseBasicParsing = $true; OutFile = $target; TimeoutSec = 300; ErrorAction = 'Stop' }
                 if ($isCore) { $request['SkipCertificateCheck'] = $true }
 
                 Write-Output "Now Downloading $link"
                 try
                     {
                     Invoke-WebRequest @request
+                    if ($viaTemp) { [System.IO.File]::Move($target, $destination) }
                     $downloaded++
                     }
                 catch
                     {
                     Write-Output "[!] Could not download $link : $($_.Exception.Message)"
                     $failed++
+                    if ($viaTemp -and (Test-Path -LiteralPath $target)) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
                     if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue }
                     }
                 }
@@ -803,17 +836,14 @@ public static class PowerMetaTrustAllCertificates {
         Write-Output "[*] Downloaded $downloaded files to $OutputPath ($failed failed)."
 }
 
-#Finds exiftool next to this script, in the current directory, or on the PATH
+#Finds exiftool next to this script or on the PATH. The current directory is deliberately not searched:
+#it may be a folder of files that were downloaded from the target.
 function Get-PowerMetaExifTool {
     if ($env:OS -eq 'Windows_NT') { $name = 'exiftool.exe' } else { $name = 'exiftool' }
 
-    $folders = @()
-    if ($PSScriptRoot) { $folders += $PSScriptRoot }
-    $folders += (Get-Location).Path
-
-    foreach ($folder in $folders)
+    if ($PSScriptRoot)
         {
-        $candidate = Join-Path $folder $name
+        $candidate = Join-Path $PSScriptRoot $name
         if (Test-Path -LiteralPath $candidate -PathType Leaf) { return (Convert-Path -LiteralPath $candidate) }
         }
 
@@ -846,9 +876,10 @@ function Test-PowerMetaExifTool {
     return $true
 }
 
-#Runs exiftool and returns its output lines. ExifTool writes UTF-8, so the console encoding is switched while it runs.
+#Runs exiftool on every file in a folder and returns its output lines.
+#ExifTool writes UTF-8, so the console encoding is switched while it runs.
 function Invoke-PowerMetaExifTool {
-    param([string]$ExifToolPath, [string[]]$Arguments)
+    param([string]$ExifToolPath, [string[]]$Options, [string]$Folder)
 
     $previousEncoding = $null
     try
@@ -863,7 +894,10 @@ function Invoke-PowerMetaExifTool {
 
     try
         {
-        & $ExifToolPath $Arguments
+        #"-ext *" makes exiftool read every file, also those without a known extension.
+        #The '*' and the folder have to be quoted strings right here: PowerShell 7 on Linux and macOS expands
+        #wildcards in arguments that come from a variable, but never in a quoted string.
+        & $ExifToolPath $Options -ext '*' "$Folder"
         }
     finally
         {
@@ -896,7 +930,7 @@ Function ExtractMetadata{
         $exiftool = Get-PowerMetaExifTool
         if (-not $exiftool)
             {
-            Write-Output "[*] ExifTool was not found next to PowerMeta.ps1, in the current directory, or on the PATH. Run Install-ExifTool to download the current release, then run: ExtractMetadata -OutputDir `"$OutputDir`""
+            Write-Output "[*] ExifTool was not found next to PowerMeta.ps1 or on the PATH. Run Install-ExifTool to download the current release, then run: ExtractMetadata -OutputDir `"$OutputDir`""
             return
             }
         if (-not (Test-PowerMetaExifTool $exiftool))
@@ -908,12 +942,11 @@ Function ExtractMetadata{
         #A path that ends in a backslash would swallow the closing quote when it is passed to exiftool
         if ($OutputPath.EndsWith('\')) { $OutputPath = $OutputPath + '.' }
 
-        #"-ext *" makes exiftool read every file, also those without a known extension
         #If "ExtractAllToCsv flag is set extract all metadata from files
         if ($ExtractAllToCsv -ne "")
             {
             Write-Output "[*] Now extracting metadata from $OutputDir"
-            $csv = @(Invoke-PowerMetaExifTool -ExifToolPath $exiftool -Arguments @('-csv', '-q', '-q', '-ext', '*', $OutputPath))
+            $csv = @(Invoke-PowerMetaExifTool -ExifToolPath $exiftool -Options @('-csv', '-q', '-q') -Folder $OutputPath)
             if ($csv.Count -lt 2)
                 {
                 Write-Output "[*] ExifTool found no metadata in $OutputDir."
@@ -933,7 +966,7 @@ Function ExtractMetadata{
 
         #If we are not extracting all Metadata just get the Author and Creator for possible usernames.
         Write-Output "[*] Now extracting metadata from $OutputDir"
-        $json = (@(Invoke-PowerMetaExifTool -ExifToolPath $exiftool -Arguments @('-j', '-q', '-q', '-Author', '-Creator', '-ext', '*', $OutputPath)) -join "`n").Trim()
+        $json = (@(Invoke-PowerMetaExifTool -ExifToolPath $exiftool -Options @('-j', '-q', '-q', '-Author', '-Creator') -Folder $OutputPath) -join "`n").Trim()
 
         $records = @()
         if ($json -ne '')
@@ -1092,10 +1125,10 @@ Function Install-ExifTool{
             if (Test-Path -LiteralPath $targetFiles)
                 {
                 Write-Output "[*] Replacing the existing $targetFiles"
-                Remove-Item -LiteralPath $targetFiles -Recurse -Force
+                Remove-Item -LiteralPath $targetFiles -Recurse -Force -ErrorAction Stop
                 }
-            Copy-Item -LiteralPath $files -Destination $targetFiles -Recurse -Force
-            Copy-Item -LiteralPath $launcher -Destination (Join-Path $Destination 'exiftool.exe') -Force
+            Copy-Item -LiteralPath $files -Destination $targetFiles -Recurse -Force -ErrorAction Stop
+            Copy-Item -LiteralPath $launcher -Destination (Join-Path $Destination 'exiftool.exe') -Force -ErrorAction Stop
 
             Write-Output "[*] ExifTool $version was installed to $Destination"
             }

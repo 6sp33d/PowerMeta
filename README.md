@@ -28,9 +28,11 @@ The route Google itself offers after that date is Agent Search (formerly Vertex 
 ## Metadata Extraction
 PowerMeta uses [ExifTool](https://exiftool.org/) by Phil Harvey to extract metadata information from files. ExifTool is no longer shipped in this repository: the copy that used to be here (version 10.47 from 2017) can be made to run code by a crafted file (CVE-2021-22204), and PowerMeta runs ExifTool on files downloaded from the target.
 
-On Windows, run `Install-ExifTool` once. It downloads the current official ExifTool package, checks it against the SHA-256 checksum published on exiftool.org, and puts `exiftool.exe` and its `exiftool_files` folder next to `PowerMeta.ps1`. You can also install ExifTool yourself: PowerMeta looks for it next to `PowerMeta.ps1`, in the current directory, and on the PATH, and refuses versions older than 12.24. On Linux or macOS install it with your package manager.
+On Windows, run `Install-ExifTool` once. It downloads the current official ExifTool package, checks it against the SHA-256 checksum published on exiftool.org, and puts `exiftool.exe` and its `exiftool_files` folder next to `PowerMeta.ps1`. You can also install ExifTool yourself: PowerMeta looks for it next to `PowerMeta.ps1` and on the PATH, and refuses versions older than 12.24. It no longer looks in the current directory, because that may be a folder of downloaded files. On Linux or macOS install it with your package manager.
 
-By default PowerMeta just extracts the 'Author' and 'Creator' fields as these commonly have usernames saved. However all metadata for files can be extracted by passing PowerMeta the -ExtractAllToCsv flag.
+By default PowerMeta just extracts the 'Author' and 'Creator' fields as these commonly have usernames saved. However all metadata for files can be extracted by passing PowerMeta the -ExtractAllToCsv flag. The values in that CSV come straight from the target's documents: a spreadsheet program treats a value that starts with `=`, `+`, `-` or `@` as a formula, so be careful when opening it.
+
+Target servers often have expired or self-signed certificates, so certificate errors are ignored while files are downloaded (and only then).
 
 ## Requirements
 - Windows PowerShell 5.1, or PowerShell 7

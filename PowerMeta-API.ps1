@@ -1,5 +1,4 @@
 <#
-By Beau Bullock (@dafthack)
 .SYNOPSIS
     PowerMeta-API - Find files hosted on target domains using Google Custom Search API
 
@@ -67,6 +66,8 @@ By Beau Bullock (@dafthack)
     .\PowerMeta-API.ps1 -TargetDomain "example.com" -ApiKey "YOUR_API_KEY" -SearchEngineId "YOUR_SEARCH_ENGINE_ID" -Download -Extract -ExtractAllToCsv "metadata.csv" -OutputDir "downloads"
 
 .NOTES
+    Author: Beau Bullock (@dafthack)
+
     Setup Instructions (only possible for projects that already use the Custom Search JSON API):
     1. Go to https://console.cloud.google.com/
     2. Select your existing project
@@ -137,19 +138,40 @@ function Get-ApiErrorText {
     try { $status = [int]$ErrorRecord.Exception.Response.StatusCode } catch { $status = 0 }
 
     # Google answers errors with JSON: { "error": { "code": 403, "message": "..." } }
-    $detail = ''
+    $raw = ''
     try {
-        if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
-            $body = ConvertFrom-Json -InputObject $ErrorRecord.ErrorDetails.Message
+        if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) { $raw = [string]$ErrorRecord.ErrorDetails.Message }
+    }
+    catch { $raw = '' }
+
+    # Windows PowerShell only fills ErrorDetails when the answer has a Content-Length header, and Google
+    # sends its errors without one, so there the body is read from the response itself
+    if ($raw -eq '') {
+        try {
+            $failedResponse = $ErrorRecord.Exception.Response
+            if ($null -ne $failedResponse -and $failedResponse.PSObject.Methods['GetResponseStream']) {
+                $stream = $failedResponse.GetResponseStream()
+                if ($stream.CanSeek) { $stream.Position = 0 }
+                $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+                try { $raw = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            }
+        }
+        catch { $raw = '' }
+    }
+
+    $detail = ''
+    if ($raw -ne '') {
+        try {
+            $body = ConvertFrom-Json -InputObject $raw
             if ($body.error -and $body.error.message) { $detail = [string]$body.error.message }
         }
+        catch { $detail = '' }
     }
-    catch { $detail = '' }
     if ($detail -eq '') { $detail = [string]$ErrorRecord.Exception.Message }
 
     $hint = ''
     switch ($status) {
-        400 { $hint = ' Check the Search Engine ID.' }
+        400 { $hint = ' Check the API key and the Search Engine ID.' }
         403 { $hint = ' Either the Custom Search API is not enabled for the project this key belongs to, the key is restricted, or the project is not an existing customer (Google closed this API to new customers).' }
         429 { $hint = ' The query quota is used up (the free tier allows 100 queries per day).' }
     }
@@ -318,8 +340,10 @@ foreach ($fileType in $fileTypeArray) {
     Write-Host ""
 }
 
-# Remove duplicates and sort
-$uniqueResults = @($allResults | Where-Object { $_ } | Sort-Object -Unique)
+# Remove duplicates and sort. Links that differ only in letter case are different files, so the
+# comparison is exact (Sort-Object -Unique would ignore case).
+$seenLinks = New-Object 'System.Collections.Generic.HashSet[string]'
+$uniqueResults = @($allResults | Where-Object { $_ -and $seenLinks.Add([string]$_) } | Sort-Object)
 
 Write-Host "=========================================="
 Write-Host "SEARCH COMPLETE"
@@ -352,7 +376,7 @@ if ($apiErrors -gt 0) {
 # Save to file if specified
 if ($OutputFile -ne "") {
     try {
-        $uniqueResults | Out-File -FilePath $OutputFile -Encoding ascii -ErrorAction Stop
+        $uniqueResults | Out-File -LiteralPath $OutputFile -Encoding ascii -ErrorAction Stop
         Write-Host ""
         Write-Host "[+] Results saved to: $OutputFile"
     }

@@ -121,6 +121,9 @@ Assert-Equal 'Query string is dropped' (Get-PowerMetaFileName 'https://example.c
 Assert-Equal 'Missing name becomes download' (Get-PowerMetaFileName 'https://example.com/a/') 'download'
 Assert-Equal 'PowerShell syntax in a name is defused' (Get-PowerMetaFileName 'https://example.com/x/$(calc);.pdf') '_(calc)_.pdf'
 Assert-Equal 'Reserved device name is changed' (Get-PowerMetaFileName 'https://example.com/con.pdf') '_con.pdf'
+Assert-Equal 'A download cannot be named like ExifTool' (Get-PowerMetaFileName 'https://example.com/a.pdf/exiftool.exe') '_exiftool.exe'
+Assert-Equal 'A download cannot be named like the ExifTool configuration file' (Get-PowerMetaFileName 'https://example.com/x/.ExifTool_config') '_.ExifTool_config'
+Assert-Equal 'A download cannot look like a command-line option' (Get-PowerMetaFileName 'https://example.com/x/-o.pdf') '_-o.pdf'
 
 Write-Host ""
 Write-Host "Metadata extraction"
@@ -159,17 +162,19 @@ else {
 
 if ($Live) {
     $liveDomain = Get-PowerMetaHostName $TargetDomain
+    # The same agent string Invoke-PowerMeta sends by default
+    $liveAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
 
     Write-Host ""
     Write-Host "Live search (one Bing query for PDF files on $liveDomain)"
-    $links = @(Search-PowerMetaBing -Domain $liveDomain -FileType 'pdf' -MaxPages 1)
+    $links = @(Search-PowerMetaBing -Domain $liveDomain -FileType 'pdf' -UserAgent $liveAgent -MaxPages 1)
     Write-Host "[info] Bing returned $($links.Count) PDF links on $liveDomain"
     $links | Select-Object -First 5 | ForEach-Object { Write-Host "       $_" }
 
     Write-Host ""
     Write-Host "Live search (one DuckDuckGo query for PDF files on $liveDomain)"
     $ddgBlocked = $false
-    $links = @(Search-PowerMetaDuckDuckGo -Domain $liveDomain -FileType 'pdf' -MaxPages 1 -Blocked ([ref]$ddgBlocked))
+    $links = @(Search-PowerMetaDuckDuckGo -Domain $liveDomain -FileType 'pdf' -UserAgent $liveAgent -MaxPages 1 -Blocked ([ref]$ddgBlocked))
     Write-Host "[info] DuckDuckGo returned $($links.Count) PDF links on $liveDomain (bot check shown: $ddgBlocked)"
     $links | Select-Object -First 5 | ForEach-Object { Write-Host "       $_" }
 }
