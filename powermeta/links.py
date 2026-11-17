@@ -116,18 +116,21 @@ def unwrap_duckduckgo(link):
     return decoded if re.match(r"https?://", decoded, re.I) else None
 
 
-def classify_google_link(link):
+def classify_google_link(link, own_hosts=()):
     """Sort a link from a Google results page into one of three kinds.
 
     ("address", url)   a result address that can be used as it is (also unwrapped from /url?q=...)
     ("redirect", link) a google.com/goto?url=... link: the address is hidden and has to be resolved
     ("other", None)    one of Google's own links, or something that is not an http(s) address
+
+    own_hosts names further hosts ("host" or "host:port") to treat as Google's own.
     """
     parts = _split(link)
     if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
         return ("other", None)
     host = parts.hostname.lower()
-    if not re.fullmatch(r"(?:[a-z0-9\-]+\.)*google\.[a-z.]{2,6}", host):
+    is_google = re.fullmatch(r"(?:[a-z0-9\-]+\.)*google\.[a-z.]{2,6}", host) is not None
+    if not is_google and parts.netloc.lower() not in own_hosts and host not in own_hosts:
         return ("address", link)
     if parts.path == "/goto":
         return ("redirect", link)

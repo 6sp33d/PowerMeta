@@ -26,7 +26,8 @@ MINIMUM_VERSION = (12, 24)
 def _on_path(name):
     """Look for a program on the PATH. Unlike shutil.which on Windows this never looks in the current
     directory, which may be a folder of files that were downloaded from the target."""
-    extensions = [".exe", ".cmd", ".bat"] if os.name == "nt" else [""]
+    # On Windows only a real program counts: a .cmd or .bat file would hand its arguments to cmd.exe
+    extensions = [".exe"] if os.name == "nt" else [""]
     for folder in os.environ.get("PATH", "").split(os.pathsep):
         folder = folder.strip('"')
         if not folder or not os.path.isabs(folder):

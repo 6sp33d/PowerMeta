@@ -219,7 +219,7 @@ def build_parser():
         help="also search in a visible browser window that you can use to answer any check the search engine "
         "shows: google, bing, duckduckgo (all three if no list is given). Needs 'pip install selenium'.",
     )
-    parser.add_argument("--browser-name", choices=("chrome", "edge", "firefox"), default="chrome", help="the browser to open (default: %(default)s)")
+    parser.add_argument("--browser-name", choices=("chrome", "edge"), default="chrome", help="the browser to open (default: %(default)s)")
     parser.add_argument("--extract-dir", metavar="DIR", default="", help="only extract metadata from the files in DIR")
     parser.add_argument("--install-exiftool", action="store_true", help="Windows: download the current ExifTool and put it next to PowerMeta")
     parser.add_argument("--version", action="version", version="PowerMeta (Python) " + __version__)
@@ -227,6 +227,14 @@ def build_parser():
 
 
 def main(argv=None):
+    # Metadata can hold characters the console cannot show (a Windows console often knows one code page
+    # only). Show a "?" for those instead of stopping with an error.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     parser = build_parser()
     args = parser.parse_args(argv)
 

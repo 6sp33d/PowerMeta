@@ -115,6 +115,65 @@ Run it with (`PowerMeta.ps1` must be in the same folder):
 ```
 The API returns at most 100 results per file type, and the free tier allows 100 queries per day.
 
+## Python Version
+The folder `powermeta` holds the same tool in Python (3.7 or later). It needs no extra packages for a normal run, and it has one thing the PowerShell version does not: it can run the searches in a real browser window.
+
+``` PowerShell
+PS C:\> python -m powermeta -d targetdomain.com
+PS C:\> python -m powermeta -d targetdomain.com -t "pdf, docx" --download --extract
+PS C:\> python -m powermeta -d targetdomain.com --download --extract --csv all-target-metadata.csv
+PS C:\> python -m powermeta --extract-dir .\2017-03-031-144953 --csv all-target-metadata.csv
+PS C:\> python -m powermeta --install-exiftool
+```
+Run these from the folder that holds `PowerMeta.ps1`. The options match the PowerShell ones:
+
+```
+-d, --domain          - TargetDomain
+-t, --types           - FileTypes
+-o, --output-dir      - OutputDir
+--list-out FILE       - OutputList
+--list-in FILE        - TargetFileList
+--download            - Download
+--extract             - Extract
+--csv FILE            - ExtractAllToCsv
+--user-agent          - UserAgent
+--max-pages           - MaxSearchPages
+--delay               - SearchDelay
+--sources             - SearchEngines (archive, bing, duckduckgo)
+--browser [ENGINES]   - search in a browser window (google, bing, duckduckgo); see below
+--browser-name        - chrome (the default) or edge
+--extract-dir DIR     - the same as ExtractMetadata -OutputDir DIR
+--install-exiftool    - the same as Install-ExifTool
+```
+Both versions use the same ExifTool: next to `PowerMeta.ps1`, or on the PATH.
+
+### Searching In A Browser Window
+Google no longer answers scripts at all, and Bing and DuckDuckGo turn them away on many networks. With `--browser` the Python version opens a normal Chrome or Edge window and runs the searches there. When a search engine shows a check ("are you a robot") or a consent box, PowerMeta stops and asks you to deal with it in the window, then carries on.
+
+``` PowerShell
+PS C:\> pip install selenium
+PS C:\> python -m powermeta -d targetdomain.com --browser
+PS C:\> python -m powermeta -d targetdomain.com --browser google --browser-name edge
+```
+`--browser` alone uses Google, Bing and DuckDuckGo. The Internet Archive is still asked as well; `--sources` controls that.
+
+What to expect:
+- You have to be there. PowerMeta never answers a check itself, and does nothing to hide that the browser is automated: the browser shows its "controlled by automated test software" notice and tells the pages so. A search engine may keep showing checks or refuse altogether; type `s` at the prompt to leave it out.
+- Google is slow. Its result pages no longer contain the addresses of the results, only redirect links, so PowerMeta opens each result link in a second tab to see where it leads, about ten per page of results.
+- The search engines' terms do not allow automated searching. Expect checks, and possibly a temporary block of your network by a search engine. Do not sign in to an account in that window.
+- The browser keeps its own profile in a folder named `.powermeta` in your home folder, so a consent box you have answered stays answered.
+- This mode has been run against local stand-ins for the three search engines, not against the real ones.
+
+### Tests
+``` PowerShell
+PS C:\> python -m unittest discover -s tests -t .
+```
+The tests use a local stand-in server and never contact the real services. The browser tests need Selenium and Chrome and only run when asked for:
+``` PowerShell
+PS C:\> $env:POWERMETA_BROWSER_TESTS = "1"
+PS C:\> python -m unittest tests.test_browser
+```
+
 ## Checking Your Setup
 `Test-PowerMeta.ps1` checks the helper functions without touching the network, and tests metadata extraction on two small PDF files it creates itself.
 ``` PowerShell

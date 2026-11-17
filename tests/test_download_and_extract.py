@@ -279,6 +279,35 @@ class CommandLine(TemporaryFolder):
         self.assertEqual(paths, ["/files/report.pdf", "/gone.pdf"])
         self.assertIn("[*] Downloaded 1 files", output)
 
+    def test_engines_searched_in_the_browser_are_not_also_asked_with_plain_requests(self):
+        from powermeta import browser
+
+        calls = []
+
+        def fake_search(engines, domain, file_types, max_pages, delay, browser_name, log):
+            calls.append((list(engines), domain, list(file_types), browser_name))
+            # The browser finds today's https address of a file the Archive lists under http
+            return ["https://127.0.0.1:%d/files/report.pdf" % self.server.port, "http://127.0.0.1:%d/files/browser-only.pdf" % self.server.port]
+
+        with patched(browser, search=fake_search):
+            code, output, server = self.run_with_server(
+                ["-d", "127.0.0.1", "-t", "pdf", "--delay", "0", "--browser", "google,bing", "--browser-name", "edge", "--list-out", os.path.join(self.folder, "l.txt")]
+            )
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, [(["google", "bing"], "127.0.0.1", ["pdf"], "edge")])
+        paths = [request.path for request in server.requests]
+        # Bing went through the browser, so only DuckDuckGo and the Archive were asked with plain requests
+        self.assertNotIn("/bing", paths)
+        self.assertIn("/ddg", paths)
+        self.assertIn("/cdx", paths)
+        with open(os.path.join(self.folder, "l.txt")) as saved:
+            listed = saved.read().split()
+        # report.pdf is listed once, under the address the browser found; gone.pdf comes from the Archive
+        self.assertEqual(
+            listed,
+            sorted(["https://127.0.0.1:%d/files/report.pdf" % server.port, "http://127.0.0.1:%d/files/browser-only.pdf" % server.port, "http://127.0.0.1:%d/gone.pdf" % server.port]),
+        )
+
     def test_bad_input_is_explained(self):
         self.assertEqual(run_cli(["-d", "not a domain"])[0], 1)
         self.assertIn("No file types", run_cli(["-d", "example.com", "-t", "p df"])[1])
