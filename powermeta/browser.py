@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import time
 import urllib.parse
 
@@ -32,6 +33,7 @@ DUCKDUCKGO_URL = "https://html.duckduckgo.com/html/"
 # Extra command-line arguments for the browser, and where it keeps its profile (the tests run it without a
 # window and with a throw-away profile)
 EXTRA_ARGUMENTS = []
+EXTRA_PREFERENCES = {}
 PROFILE_FOLDER = None
 
 # Seconds a page may take to load; seconds a result link gets to show where it leads; seconds a click
@@ -58,6 +60,8 @@ _LOST = re.compile(
 
 # The link of a result as it is shown in the page: the first one with a size, the result's title if
 # there are several. It is moved into view so that it can be clicked.
+# A result that would open in a new window is made to open in this one: only what happens in the results
+# window can be read from the network log.
 _FIND_LINK = (
     "var wanted = arguments[0], found = null, all = document.querySelectorAll('a[href]');"
     "for (var i = 0; i < all.length; i++) {"
@@ -67,10 +71,18 @@ _FIND_LINK = (
     "  if (box.width < 2 || box.height < 2) continue;"
     "  if (!found || (a.querySelector('h3') && !found.querySelector('h3'))) found = a;"
     "}"
-    "if (found) found.scrollIntoView({block: 'center'});"
+    "if (found) {"
+    "  var elsewhere = found.target ? found.target !== '_self' : document.querySelector('base[target]') !== null;"
+    "  if (elsewhere) found.setAttribute('target', '_self');"
+    "  found.scrollIntoView({block: 'center'});"
+    "}"
     "return found;"
 )
 _ALL_LINKS = "return Array.prototype.map.call(document.querySelectorAll('a[href]'), function (a) { return a.href; });"
+# The links of a page that only tells where the browser is being sent: a page that asks for something
+# (a form, a button) is not such a page
+_NOTICE_LINKS = "if (document.querySelector('form, button, input[type=submit], input[type=button]')) return [];" + _ALL_LINKS
+_FORWARDS = re.compile(r"<meta\b[^<>]*http-equiv=[\"']?refresh", re.I)
 
 _NOT_OPENED = object()  # the browser never asked for the link
 
@@ -148,6 +160,9 @@ class Session:
         self.gone = False  # the window was closed, or the browser can no longer be reached
         self.lookups_off = lookup == "off"  # results that hide their address are left out
         self.results_reloaded = False  # the results page had to be opened again after a lookup
+        self.delay = 0  # seconds between two requests to the same search engine
+        self._click_problem = ""
+        self._said_not_clickable = False
         self._asked_about_empty_page = set()
         self._unresolved_in_a_row = 0
         self._requests_refused = 0
@@ -189,11 +204,17 @@ class Session:
         if network_log:
             # The network log is how the address behind one of Google's redirect links is read
             options.set_capability(logging_capability, {"performance": "ALL"})
-        # Result links point at documents: they must not open in the built-in viewer or be saved
-        options.add_experimental_option("prefs", {"plugins.always_open_pdf_externally": True})
+        # Result links point at documents: they must not open in the built-in viewer, and nothing is saved
+        preferences = {"plugins.always_open_pdf_externally": True, "download_restrictions": 3}
+        preferences.update(EXTRA_PREFERENCES)
+        options.add_experimental_option("prefs", preferences)
+
+        def start(service=None):
+            driver_class = webdriver.Edge if browser_name == "edge" else webdriver.Chrome
+            return driver_class(options=options) if service is None else driver_class(options=options, service=service)
 
         try:
-            self.driver = webdriver.Edge(options=options) if browser_name == "edge" else webdriver.Chrome(options=options)
+            self.driver = self._start_apart_from_ctrl_c(start, browser_name) or start()
         except Exception as error:
             hint = (
                 " If another PowerMeta browser window is still open, close it first: both would use the "
@@ -207,8 +228,37 @@ class Session:
             raise BrowserUnavailable("the browser could not be started: %s.%s" % (_first_line(error).rstrip("."), hint))
         try:
             self.driver.set_page_load_timeout(PAGE_LOAD_WAIT)
-            self.driver.execute_cdp_cmd("Browser.setDownloadBehavior", {"behavior": "deny"})
         except WebDriverException:
+            pass
+        self._deny_downloads()
+
+    @staticmethod
+    def _start_apart_from_ctrl_c(start, browser_name):
+        """Windows only: start the browser's driver in a process group of its own. Ctrl+C would otherwise
+        end the driver at once, and the browser could no longer be asked to close. Returns the started
+        browser, or None if it has to be started the ordinary way."""
+        if os.name != "nt":
+            return None
+        try:
+            if browser_name == "edge":
+                from selenium.webdriver.edge.service import Service
+            else:
+                from selenium.webdriver.chrome.service import Service
+            service = Service()
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP
+            # The name of this setting differs between Selenium releases
+            service.creation_flags = flags
+            service.creationflags = flags
+            return start(service)
+        except Exception:
+            return None
+
+    def _deny_downloads(self):
+        """Tell the browser not to save what a click leads to. This is given through a tab and ends with
+        that tab, so it is said again whenever another tab takes over."""
+        try:
+            self.driver.execute_cdp_cmd("Browser.setDownloadBehavior", {"behavior": "deny"})
+        except Exception:
             pass
 
     def close(self):
@@ -385,7 +435,8 @@ class Session:
         if not in_the_way():
             return not self.gone
         if not self.gone:
-            self.log("[!] %s still shows a check. It is left out for the rest of this run." % name)
+            what = "a check" if "check or a consent box" in question else "something else than results"
+            self.log("[!] %s still shows %s. It is left out for the rest of this run." % (name, what))
             self.skipped.add(engine)
         return False
 
@@ -402,7 +453,8 @@ class Session:
             "deal with it there and then press Enter here. If the page simply has no results, just press Enter. "
             "(Type s and Enter to skip %s.) " % (name, name)
         )
-        if not self._wait_for_person(engine, question):
+        # With nobody there to look, the page is taken for what it most likely is: one without results
+        if not self._wait_for_person(engine, question, unattended=""):
             return False
         return self._back_to(engine, url)
 
@@ -422,32 +474,33 @@ class Session:
             return self._go(url)
         return not self.gone
 
-    def _answer(self, question):
-        """What the person typed, in lower case. If nothing can be asked, that counts as "s" (skip)."""
+    def _answer(self, question, unattended="s"):
+        """What the person typed, in lower case. If nobody can be asked (there is no terminal), the
+        answer is the one given as unattended: by default "s", skip."""
         try:
             return str(self.ask(question)).strip().lower()
         except EOFError:
-            return "s"
+            return unattended
 
     def _skip(self, engine):
         self.log("[*] %s is skipped for the rest of this run." % NAMES[engine])
         self.skipped.add(engine)
 
-    def _wait_for_person(self, engine, question):
-        if self._answer(question).startswith("s"):
+    def _wait_for_person(self, engine, question, unattended="s"):
+        if self._answer(question, unattended).startswith("s"):
             self._skip(engine)
             return False
         return True
 
     # -- Google's hidden addresses ------------------------------------------------------------------
 
-    def resolve(self, link, results_url=None):
+    def resolve(self, link, results_url=None, domain=None):
         """Find the address behind a result link that hides it. Returns the address, or None.
 
         results_url is the address of the results page in the window, which holds the link. The link is
         clicked there, as a person would click it. (With the lookup "request", Google's link is first
         asked with a plain web request, which needs no browser at all.) Only if the link cannot be
-        clicked is its address opened in a second tab.
+        clicked is its address opened in a second tab. domain is the domain that was searched for.
         """
         if self.gone or self.lookups_off or "google" in self.skipped:
             return None
@@ -457,10 +510,23 @@ class Session:
         destination = None
         if self.lookup == "request" and self._requests_refused < 2:
             destination = self._request_lookup(link)
+            if not destination:
+                self._pause()
         if not destination:
-            destination = self._click_lookup(link, results_url) if results_url else _NOT_OPENED
+            destination = self._click_lookup(link, results_url, domain) if results_url else _NOT_OPENED
             if destination is _NOT_OPENED:
-                destination = None if self.gone else self._tab_lookup(link)
+                destination = None
+                if not self.gone:
+                    if results_url:
+                        if not self._said_not_clickable:
+                            self._said_not_clickable = True
+                            self.log(
+                                "[!] A result could not be clicked in the results page (%s). Its link is opened in a "
+                                "second tab instead. If something in the window covers the results, close it."
+                                % self._click_problem
+                            )
+                        self._pause()
+                    destination = self._tab_lookup(link, domain)
 
         if self.gone or "google" in self.skipped:
             return None
@@ -476,6 +542,11 @@ class Session:
                 )
                 self.lookups_off = True
         return destination
+
+    def _pause(self):
+        """The wait between two requests to the same search engine."""
+        if self.delay > 0:
+            time.sleep(self.delay)
 
     def _outside(self, link):
         """A function that gives an address back if it is not one of the search engine's own."""
@@ -512,10 +583,11 @@ class Session:
             )
         return None
 
-    def _click_lookup(self, link, results_url):
+    def _click_lookup(self, link, results_url, domain=None):
         """Click the result in the results page and read from the network log where the click leads.
         Returns the address, None, or _NOT_OPENED if the link could not be clicked."""
         driver = self.driver
+        self._click_problem = "it is not shown there"
         try:
             results_tab = driver.current_window_handle
             before = set(driver.window_handles)
@@ -526,9 +598,16 @@ class Session:
             element = driver.execute_script(_FIND_LINK, link)
             if element is None:
                 return _NOT_OPENED
+            # The click is known by where it happens: the next page this window asks for. Its address may
+            # differ from the one that was read (a page can change a link at the moment it is clicked).
+            try:
+                frame = driver.execute_cdp_cmd("Page.getFrameTree", {})["frameTree"]["frame"]["id"]
+            except (self._errors, KeyError, TypeError):
+                frame = None
             driver.get_log("performance")  # discard what was logged before
             driver.set_page_load_timeout(LOOKUP_WAIT)
         except self._errors as error:
+            self._click_problem = _first_line(error)
             return None if self._failed(error) else _NOT_OPENED
 
         def left_results():
@@ -545,20 +624,26 @@ class Session:
             except self._errors:
                 pass
 
-        destination = None
+        destination, restore = None, True
         try:
+            self._click_problem = "the click did not open it"
             try:
                 element.click()
-            except self._errors:
-                pass  # covered by something, or the page it leads to is slow: the log says what happened
-            destination = self._watch(link, left_results, open_again)
+            except self._errors as error:
+                # Covered by something, or the page it leads to is slow: the log says what happened
+                self._click_problem = _first_line(error)
+            destination = self._watch(link, left_results, open_again, frame, domain)
         except self._errors:
             destination = None
+        except BaseException:
+            # Ctrl+C: nothing more is asked of the search engine on the way out
+            restore = False
+            raise
         finally:
-            self._back_to_results(results_tab, before, results_url, shown, page)
+            self._back_to_results(results_tab, before, results_url if restore else None, shown, page)
         return destination
 
-    def _tab_lookup(self, link):
+    def _tab_lookup(self, link, domain=None):
         """Open the address of a result link in a second tab and read from the network log where it
         leads. Returns the address, or None."""
         driver = self.driver
@@ -581,18 +666,19 @@ class Session:
             driver.get_log("performance")  # discard what was logged before
             driver.set_page_load_timeout(LOOKUP_WAIT)
             open_link()
-            destination = self._watch(link, None, open_link)
+            destination = self._watch(link, None, open_link, None, domain)
         except self._errors:
             destination = None
         finally:
             self._back_to_results(results_tab, before)
         return None if destination is _NOT_OPENED else destination
 
-    def _watch(self, link, left_results=None, open_again=None):
+    def _watch(self, link, left_results=None, open_again=None, frame=None, domain=None):
         """Wait for the link that was just opened in the current window to show where it leads.
 
-        left_results is given when the link was clicked in the results page: a function that says whether
-        the window has left that page. open_again opens the link once more.
+        left_results and frame are given when the link was clicked in the results page: a function that
+        says whether the window has left that page, and the window's own frame in the network log.
+        open_again opens the link once more. domain is the domain that was searched for.
 
         The first address outside the search engine that the window asks for after the link is the one:
         through a redirect, or because the page sent the browser on by itself. Where the site sends the
@@ -622,12 +708,16 @@ class Session:
 
         def in_log():
             """(whether the browser asked for the link, the address that led to or None)"""
-            frame, opened = None, False
+            link_frame, opened = None, False
             for document_frame, address in documents:
                 if not opened:
-                    if _page(address) == start:
-                        frame, opened = document_frame, True
-                elif document_frame == frame and outside(address):
+                    # The link is known by its address or, when it was clicked, by being the first page
+                    # the results window asks for
+                    if _page(address) == start or (frame is not None and document_frame == frame):
+                        link_frame, opened = document_frame, True
+                        if outside(address):
+                            return True, outside(address)
+                elif document_frame == link_frame and outside(address):
                     return True, outside(address)
             return opened, None
 
@@ -644,18 +734,23 @@ class Session:
             if outside(now):
                 return outside(now)  # the window went on by itself and the log did not show it
 
-            # Is the window showing a page of the search engine other than the results?
-            if _host(now) == own_host and (left_results is None or left_results()):
-                check = page_state("google", now, driver.page_source) == "check"
-                if not check:
-                    # A notice in between that names the address ("you are being sent to ...")
-                    hrefs = driver.execute_script(_ALL_LINKS)
+            # Is the window showing a page of the search engine other than the results? (A check can be
+            # on another of the search engine's hosts than the link.)
+            own_page = now.lower().startswith(("http://", "https://")) and (_host(now) == own_host or not outside(now))
+            if own_page and (left_results is None or left_results()):
+                source = driver.page_source
+                check = page_state("google", now, source) == "check"
+                if not check and domain:
+                    # A notice in between that names the address ("you are being sent to ..."). Only an
+                    # address on the domain that was searched for can be the result's.
+                    hrefs = driver.execute_script(_NOTICE_LINKS)
                     named = set(filter(None, (outside(href) for href in hrefs or [] if isinstance(href, str))))
-                    if len(named) == 1:
+                    if len(named) == 1 and links.is_on_domain(next(iter(named)), domain):
                         return named.pop()
                 if shown_since is None and driver.execute_script("return document.readyState") == "complete":
                     shown_since = time.time()
-                waited = shown_since is not None and time.time() - shown_since >= SHOWN_WAIT
+                # A page that says it will send the browser on by itself is given the time to do so
+                waited = shown_since is not None and time.time() - shown_since >= SHOWN_WAIT and not _FORWARDS.search(source)
                 if check or (waited and not asked):
                     if check and checks >= 3:
                         self.log("[!] Google still shows a check. It is left out for the rest of this run.")
@@ -668,7 +763,8 @@ class Session:
                     answer = self._answer(
                         "[?] Google is showing %s in the browser window. If something has to be done there "
                         "(a check, a Continue button), do it, then press Enter here. Type n and Enter to stop "
-                        "reading the addresses of results, or s and Enter to skip Google. " % what
+                        "reading the addresses of results, or s and Enter to skip Google. " % what,
+                        unattended="s" if check else "n",
                     )
                     if answer.startswith("s"):
                         self._skip("google")
@@ -780,6 +876,7 @@ class Session:
         except Exception:
             self._lose()
             return
+        self._deny_downloads()
         self._go(results_url)
 
 
@@ -845,7 +942,7 @@ def search_google(session, domain, file_type, max_pages=5, delay=2):
         # Google's result links do not show where they lead: each result is clicked to find out
         if hidden and not session.lookups_off:
             how = "each is clicked in the browser window"
-            if session.lookup == "request":
+            if session.lookup == "request" and session._requests_refused < 2:
                 how = "with plain requests to Google's links"
             log("[*] Reading where %d results lead (%s)" % (len(hidden), how))
         position = 0
@@ -853,9 +950,10 @@ def search_google(session, domain, file_type, max_pages=5, delay=2):
             if session.lookups_off or session.gone or "google" in session.skipped:
                 unread += len(hidden) - position
                 break
-            if position > 0 and delay > 0:
+            # Reading an address is a request to the search engine like any other
+            if delay > 0 and hidden[position] not in session._resolved:
                 time.sleep(delay)
-            destination = session.resolve(hidden[position], url)
+            destination = session.resolve(hidden[position], url, domain)
             if destination:
                 new += _keep(session, [destination], domain, file_type, found)[0]
             else:
@@ -902,13 +1000,13 @@ def bing_knows_site(session, domain):
     if session.gone or "bing" in session.skipped:
         return False
     session.save_page("bing-site")
-    on_domain = sum(1 for href in session.hrefs() if links.is_on_domain(links.unwrap_bing(href) or "", domain))
-    if on_domain:
+    results, on_domain, keeps_to_site = links.bing_keeps_to_site(session.source(), domain)
+    if keeps_to_site:
         return True
     if results:
-        log(sources.BING_OTHER_SITES % query)
+        log(sources.BING_OTHER_SITES % (query, on_domain, results))
     else:
-        log("[*] Bing has no pages of %s. It is left out for the rest of this run." % domain)
+        log(sources.BING_NO_RESULTS % query)
     session.skipped.add("bing")
     return False
 
@@ -938,7 +1036,7 @@ def search_bing(session, domain, file_type, max_pages=5, delay=2):
         first += results
 
     if results_seen > 0 and on_domain_seen == 0:
-        log("[*] Bing showed pages of other sites only for this search, so it has no %s files of %s." % (file_type, domain))
+        log(sources.BING_NO_FILES % (query, file_type))
     log("[*] Bing (browser): %d %s files found" % (len(found), file_type))
     return found
 
@@ -1008,6 +1106,7 @@ def search(engines, domain, file_types, max_pages=5, delay=2, browser_name="chro
         "[*] A browser window has been opened. If a search engine shows a check or a consent box, "
         "you will be asked to deal with it there."
     )
+    session.delay = delay
     try:
         for engine in engines:
             if session.gone:

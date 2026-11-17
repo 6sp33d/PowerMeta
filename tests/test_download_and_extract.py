@@ -7,6 +7,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import http.server
 
@@ -184,6 +185,46 @@ class BrokenAnswers(TemporaryFolder):
                 download(server.url + "/cut.pdf", os.path.join(self.folder, "cut.pdf"))
         self.assertEqual(os.listdir(self.folder), ["a.pdf"])
 
+    def test_a_download_that_trickles_is_stopped_after_a_while(self):
+        def trickle(path):
+            yield b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n"
+            while True:
+                yield b"x"
+                time.sleep(0.2)
+
+        started = time.time()
+        with RawServer(trickle) as server:
+            with self.assertRaises(FetchError) as raised:
+                download(server.url + "/slow.pdf", os.path.join(self.folder, "slow.pdf"), timeout=5, max_seconds=1)
+        self.assertIn("took longer than", str(raised.exception))
+        self.assertLess(time.time() - started, 10)
+        self.assertEqual(os.listdir(self.folder), [])
+
+    def test_a_file_that_cannot_be_written_here_is_not_the_site_s_fault(self):
+        # A full disk or a folder that is not writable: the Internet Archive is not asked, and the
+        # downloads stop instead of failing one by one
+        real_open = open
+
+        def full_disk(path, mode="r", *args, **kwargs):
+            if "w" in mode and os.path.basename(path).startswith(".part-"):
+                raise OSError(28, "No space left on device")
+            return real_open(path, mode, *args, **kwargs)
+
+        answers = {"/a.pdf": raw_answer(b"%PDF-a"), "/b.pdf": raw_answer(b"%PDF-b"), "/c.pdf": raw_answer(b"%PDF-c")}
+        with RawServer(lambda path: answers.get(path, raw_answer(b"copy"))) as server:
+            file_links = [server.url + path for path in answers]
+            copies = {link: server.url + "/web/2020id_/" + link for link in file_links}
+            with patched_builtin_open(web, full_disk):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    counts = cli.download_files(file_links, self.folder, archive_copies=copies)
+            asked = list(server.paths)
+        self.assertEqual(counts, (0, 3))
+        self.assertEqual(asked, ["/a.pdf"])
+        self.assertIn("could not be written ([Errno 28] No space left on device). The downloads stop here: 3 files were not downloaded.", output.getvalue())
+        self.assertNotIn("Internet Archive", output.getvalue())
+        self.assertEqual(os.listdir(self.folder), [])
+
     def test_the_working_file_is_never_an_earlier_download(self):
         earlier = os.path.join(self.folder, "a.pdf.part")
         with open(earlier, "wb") as target:
@@ -205,10 +246,7 @@ class BrokenAnswers(TemporaryFolder):
                 self._file = real_open(path, mode)
                 opened.append(path)
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
+            def close(self):
                 self._file.close()
 
             def write(self, block):
@@ -369,8 +407,19 @@ class CsvCells(unittest.TestCase):
             "+1+1": "'+1+1",
             "-1+cmd|' /C calc'!A0": "'-1+cmd|' /C calc'!A0",
             "@SUM(A1)": "'@SUM(A1)",
-            "\t=1+1": "'\t=1+1",
-            "\r=1+1": "'\r=1+1",
+            # A tab or a line break also starts a cell for some programs, so what follows is made plain too
+            "\t=1+1": "'\t'=1+1",
+            "\r=1+1": "'\r'=1+1",
+            # Inside a cell: where a program that splits on semicolons, tabs or line breaks starts a new cell
+            "x;=cmd|'/C calc'!A0;": "x;'=cmd|'/C calc'!A0;",
+            "Smith;=HYPERLINK(A1&B1);": "Smith;'=HYPERLINK(A1&B1);",
+            'x";=1+1;"': 'x";\'=1+1;"',
+            "x; =1+1": "x;' =1+1",
+            "x\t=1+1": "x\t'=1+1",
+            "x\n=1+1": "x\n'=1+1",
+            "x\r\n@SUM(A1)": "x\r\n'@SUM(A1)",
+            "a;b;c": "a;b;c",
+            "1;2": "1;2",
             "-5": "-5",
             "+0.3": "+0.3",
             "-1,5": "-1,5",
@@ -514,7 +563,9 @@ class CommandLine(TemporaryFolder):
             )
         self.assertEqual(code, 0, output)
         self.assertEqual(calls, [(["google", "bing"], "127.0.0.1", ["pdf"], "edge")])
-        self.assertEqual(options, {"lookup": "request", "user_agent": None, "save_pages": os.path.join(self.folder, "pages")})
+        self.assertEqual(
+            options, {"ask": cli.ask_person, "lookup": "request", "user_agent": None, "save_pages": os.path.join(self.folder, "pages")}
+        )
         paths = [request.path for request in server.requests]
         # Bing went through the browser, so only DuckDuckGo and the Archive were asked with plain requests
         self.assertNotIn("/bing", paths)
@@ -528,19 +579,67 @@ class CommandLine(TemporaryFolder):
             sorted(["https://127.0.0.1:%d/files/report.pdf" % server.port, "http://127.0.0.1:%d/files/browser-only.pdf" % server.port, "http://127.0.0.1:%d/gone.pdf" % server.port]),
         )
 
+    def test_without_a_terminal_a_question_of_the_browser_search_is_not_waited_for(self):
+        output = io.StringIO()
+        with patched(cli.sys, stdin=io.StringIO("")), contextlib.redirect_stdout(output):
+            with self.assertRaises(EOFError):
+                cli.ask_person("[?] Deal with it there, then press Enter here. ")
+        self.assertIn("Not asked, because there is no terminal.", output.getvalue())
+
     def test_bing_is_not_asked_for_files_when_it_does_not_keep_to_the_site(self):
         self.bing_keeps_to_site = False
         with patched(cli.sys, stdin=io.StringIO("")):
             code, output, server = self.run_with_server(["-d", "127.0.0.1", "-t", "pdf, docx", "--delay", "0"])
         self.assertEqual(code, 0, output)
-        self.assertIn("with pages of other sites only", output)
+        self.assertIn("with pages of other sites (0 of its 2 results are on the site)", output)
         self.assertEqual(sum(1 for request in server.requests if request.path == "/bing"), 1)
         # The Internet Archive's files are still there, and nothing of another site was kept
         self.assertIn("[*] A total of 2 files were discovered.", output)
 
+    def test_an_output_folder_that_cannot_be_used_is_noticed_before_the_search(self):
+        a_file = os.path.join(self.folder, "a file")
+        open(a_file, "w").close()
+        for unusable in (a_file, os.path.join(a_file, "sub", "folder")):
+            code, output, server = self.run_with_server(["-d", "127.0.0.1", "-t", "pdf", "--delay", "0", "--download", "-o", unusable])
+            self.assertEqual(code, 1, output)
+            self.assertIn("cannot be used", output)
+            self.assertEqual(server.requests, [])
+        # A folder that does not exist yet, below one that does, is fine
+        code, output, _ = self.run_with_server(
+            ["-d", "127.0.0.1", "-t", "pdf", "--sources", "archive", "--download", "-o", os.path.join(self.folder, "new", "deeper")]
+        )
+        self.assertEqual(code, 0, output)
+
+    def test_links_are_printed_when_the_output_folder_fails_after_the_search(self):
+        def refuse(*args, **kwargs):
+            raise OSError(30, "Read-only file system")
+
+        with patched(cli, download_files=refuse):
+            code, output, server = self.run_with_server(["-d", "127.0.0.1", "-t", "pdf", "--sources", "archive", "--download"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("The links that were found", output)
+        self.assertIn("\n%s/gone.pdf\n" % server.url, output)
+
+    @unittest.skipIf(os.name == "nt", "uses a shell script as a stand-in for ExifTool")
+    def test_a_metadata_value_is_printed_on_one_line(self):
+        records = r'[{"SourceFile": "a.pdf", "Author": "Eve\n[*] Downloaded 0 files (999 failed).\r\n[!] Run this command", "Creator": ["two\twords", " Writer "]}]'
+        fake = os.path.join(self.folder, "fake-exiftool")
+        with open(fake, "w") as target:
+            target.write("#!/bin/sh\ncat <<'END'\n%s\nEND\n" % records)
+        os.chmod(fake, 0o755)
+        self.assertEqual(
+            exif.extract_authors(fake, self.folder), (1, ["Eve [*] Downloaded 0 files (999 failed). [!] Run this command", "two words", "Writer"])
+        )
+
     def test_bad_input_is_explained(self):
         self.assertEqual(run_cli(["-d", "not a domain"])[0], 1)
         self.assertIn("No file types", run_cli(["-d", "example.com", "-t", "p df"])[1])
+        for delay in ("inf", "nan", "-1", "1e400"):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                cli.main(["-d", "example.com", "--delay", delay])
+        code, output, _ = self.run_with_server(["-d", "127.0.0.1", "-t", "pdf, docx; xlsx, tar.gz", "--sources", "archive", "--delay", "0"])
+        self.assertIn("'docx; xlsx' is not a file type and is left out", output)
+        self.assertIn("'tar.gz' is not a file type and is left out", output)
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.main(["-d", "example.com", "--sources", "altavista"])
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):

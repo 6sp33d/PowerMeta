@@ -37,7 +37,7 @@ Function Invoke-PowerMeta{
     The target domain to search for files.
 
     .PARAMETER FileTypes
-    A comma seperated list of file extensions to search for. By default PowerMeta searches for "pdf, docx, xlsx, doc, xls, pptx, ppt".
+    A comma seperated list of file extensions to search for. By default PowerMeta searches for "pdf, docx, xlsx, doc, xls, pptx, ppt". A downloaded file keeps its name only if it ends in one of these types (also with -TargetFileList); other names get the type or ".download" added.
 
     .PARAMETER OutputList
     A file to output the list of links discovered through web searching to.
@@ -1140,7 +1140,9 @@ function Invoke-PowerMetaExifTool {
 
 #A spreadsheet program runs a cell that starts with = + - or @ as a formula, and the metadata comes from
 #downloaded files. Such a cell gets an apostrophe in front, which makes it plain text. Plain numbers such
-#as -5 or +0.3 are left as they are. Takes the whole CSV text (lines joined with a line feed) and returns it.
+#as -5 or +0.3 are left as they are. The same is done inside a cell, after a semicolon, a tab or a line
+#break: some spreadsheet programs start a new cell there.
+#Takes the whole CSV text (lines joined with a line feed) and returns it.
 function ConvertTo-PowerMetaInertCsv {
     param([string]$Text)
 
@@ -1151,7 +1153,11 @@ function ConvertTo-PowerMetaInertCsv {
         param($found)
         $quoted = $found.Groups['q'].Success
         if ($quoted) { $cell = $found.Groups['q'].Value } else { $cell = $found.Groups['u'].Value }
-        if ($cell -match '^[=+\-@\t\r\n]' -and $cell -notmatch '^[+-]?[0-9]+([.,][0-9]+)?\z') { $cell = "'" + $cell }
+        if ($cell -notmatch '^[+-]?[0-9]+([.,][0-9]+)?\z')
+            {
+            if ($cell -match '^[=+\-@\t\r\n]') { $cell = "'" + $cell }
+            $cell = [regex]::Replace($cell, '(?<=[;\t\r\n])(?=[ "]*[=+\-@])', "'")
+            }
         if ($quoted) { $cell = '"' + $cell + '"' }
         $cell + $found.Groups['d'].Value
     }
@@ -1206,8 +1212,22 @@ Function ExtractMetadata{
                 {
                 #Cells that a spreadsheet program would run as a formula are made plain text
                 $csv = @((ConvertTo-PowerMetaInertCsv -Text ($csv -join "`n")) -split "`n")
-                Set-Content -LiteralPath $ExtractAllToCsv -Value $csv -Encoding UTF8 -ErrorAction Stop
-                Write-Output ('[*] Metadata for ' + ($csv.Count - 1) + " files was written to $ExtractAllToCsv")
+
+                #A value can span lines, so the rows are counted: a line ends a row when its quotes are closed
+                $rows = 0
+                $insideQuotes = $false
+                foreach ($line in $csv)
+                    {
+                    if (((($line -split '"').Count - 1) % 2) -eq 1) { $insideQuotes = -not $insideQuotes }
+                    if (-not $insideQuotes) { $rows++ }
+                    }
+
+                #Spreadsheet programs need the byte-order mark to read the file as UTF-8. Windows PowerShell
+                #writes it with "UTF8"; PowerShell 7 has to be asked for it by another name.
+                $csvEncoding = 'UTF8'
+                if ($PSVersionTable.PSVersion.Major -ge 6) { $csvEncoding = 'utf8BOM' }
+                Set-Content -LiteralPath $ExtractAllToCsv -Value $csv -Encoding $csvEncoding -ErrorAction Stop
+                Write-Output ('[*] Metadata for ' + ($rows - 1) + " files was written to $ExtractAllToCsv")
                 }
             catch
                 {
@@ -1244,7 +1264,8 @@ Function ExtractMetadata{
                 if ($null -eq $property -or $null -eq $property.Value) { continue }
                 foreach ($value in @($property.Value))
                     {
-                    $text = ([string]$value).Trim()
+                    #One value, one line: a value with line breaks could pass for lines of this script's output
+                    $text = (([string]$value) -replace '\s+', ' ').Trim()
                     if ($text -ne '') { $allmeta += $text }
                     }
                 }

@@ -33,23 +33,34 @@ class Bing(unittest.TestCase):
                 log = Messages()
                 found = sources.search_bing(Fetcher(), "nasa.gov", "pdf", delay=0, log=log)
         self.assertEqual(found, [])
-        self.assertIn("Bing showed pages of other sites only for this search", log.text())
+        self.assertIn("Bing showed pages of other sites only for 'site:nasa.gov filetype:pdf': it has no pdf files of the site, or", log.text())
         self.assertEqual(len(server.requests), 1)
 
     def test_bing_is_first_asked_for_the_site_alone(self):
         # A search for "site:domain" has to return pages of that domain. Bing answers some searches
         # with pages that have nothing to do with them, and then the file searches would bring up
         # other sites only.
+        stray = '<div class="b_ans">Did you mean <a href="https://www.legislature.mi.gov/">the legislature</a>?</div>'
         answers = {
             "keeps to the site": (200, fixture("bing_results.html")),
             "other sites only": (200, fixture("bing_unrelated.html")),
+            # The site's own home page among other sites, and a link to the site that is not a result:
+            # neither makes the answer one that keeps to the site
+            "one of five": (200, bing_page(["https://www.legislature.mi.gov/", "http://a.example/", "http://b.example/", "http://c.example/", "http://d.example/"])),
+            "a link that is not a result": (200, bing_page(["http://a.example/", "http://b.example/"]).replace("<ol", stray + "<ol")),
+            "most of them": (200, bing_page(["https://www.legislature.mi.gov/", "https://legislature.mi.gov/a", "http://a.example/"])),
             "nothing": (200, bing_page([])),
+            "a check page": (200, "<html><body><h1>One last step</h1><p>Please solve the challenge below</p></body></html>"),
             "error": (429, "slow down"),
         }
         expected = {
             "keeps to the site": (True, "to see whether it keeps to the site"),
-            "other sites only": (False, "with pages of other sites only"),
-            "nothing": (False, "Bing has no pages of legislature.mi.gov"),
+            "other sites only": (False, "with pages of other sites (0 of its 9 results are on the site)"),
+            "one of five": (False, "with pages of other sites (1 of its 5 results are on the site)"),
+            "a link that is not a result": (False, "with pages of other sites (0 of its 2 results are on the site)"),
+            "most of them": (True, "to see whether it keeps to the site"),
+            "nothing": (False, "Bing returned no results for 'site:legislature.mi.gov': it has no pages of the site, or it did not answer"),
+            "a check page": (False, "or it did not answer the search (a check page looks the same"),
             "error": (False, "Bing did not answer (HTTP 429"),
         }
         for name, answer in answers.items():
@@ -60,6 +71,34 @@ class Bing(unittest.TestCase):
             self.assertEqual(known, expected[name][0], name)
             self.assertIn(expected[name][1], log.text(), name)
             self.assertEqual([request.query for request in server.requests], [{"q": ["site:legislature.mi.gov"]}], name)
+
+    def test_the_results_of_a_page_are_its_organic_results(self):
+        page = fixture("bing_results.html")
+        results = links.bing_results(page)
+        self.assertEqual(len(results), links.count_bing_results(page))
+        self.assertEqual(results[0], "https://legislature.mi.gov/Laws/MCL?objectName=mcl-257-636")
+        self.assertEqual(links.bing_keeps_to_site(page, "legislature.mi.gov"), (10, 10, True))
+        self.assertEqual(links.bing_keeps_to_site(fixture("bing_unrelated.html"), "nasa.gov"), (9, 0, False))
+        self.assertEqual(links.bing_keeps_to_site("", "nasa.gov"), (0, 0, False))
+        # The same with the reader that is used when the parser gives up
+        with patched(links, _read_page=lambda page: None):
+            self.assertEqual(links.bing_keeps_to_site(page, "legislature.mi.gov"), (10, 10, True))
+
+    def test_one_session_is_kept_for_all_searches_of_an_engine(self):
+        from powermeta import cli
+
+        def respond(request):
+            if request.path == "/cdx":
+                return (200, "")
+            return (200, bing_page(["https://example.com/"]), {"Set-Cookie": "MUID=abc123; Path=/"})
+
+        with LocalServer(respond) as server:
+            with patched(sources, BING_URL=server.url + "/search", ARCHIVE_INDEX_URL=server.url + "/cdx"):
+                with patched(cli, log=lambda message="": None):
+                    cli.find_files("example.com", ["pdf", "docx"], ["bing"], [], delay=0)
+        cookies = [request.headers.get("Cookie") for request in server.requests]
+        # The cookie Bing set with its first answer comes back with every later search
+        self.assertEqual(cookies, [None, "MUID=abc123", "MUID=abc123"])
 
     def test_follows_pages_up_to_the_limit(self):
         pages = {

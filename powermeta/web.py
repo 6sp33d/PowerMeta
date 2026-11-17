@@ -6,6 +6,7 @@ import http.client
 import http.cookiejar
 import os
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,6 +26,8 @@ PROGRAM_USER_AGENT = "PowerMeta/" + __version__
 # No answer is read beyond these sizes: a server must not be able to fill the memory or the disk
 MAX_PAGE_BYTES = 64 * 1024 * 1024
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+# ... and no download may take longer than this (the timeout only limits the wait for the next piece)
+MAX_DOWNLOAD_SECONDS = 30 * 60
 
 # Everything a broken or hostile server can make urllib, http.client and zlib raise
 _REQUEST_ERRORS = (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, EOFError, zlib.error)
@@ -36,6 +39,41 @@ class FetchError(Exception):
     def __init__(self, message, status=0):
         super().__init__(message)
         self.status = status
+
+
+class SaveError(Exception):
+    """A downloaded file could not be written on this computer (the disk is full, the folder is not
+    writable). Unlike FetchError this says nothing about the server."""
+
+
+class _SavedFile:
+    """The file a download is written to. A failure to write it is told apart from a failed request."""
+
+    def __init__(self, path, destination):
+        self._destination = destination
+        try:
+            self._file = open(path, "wb")
+        except OSError as error:
+            raise SaveError(self._problem(error))
+
+    def _problem(self, error):
+        return "%s could not be written (%s)" % (self._destination, error)
+
+    def write(self, block):
+        try:
+            self._file.write(block)
+        except OSError as error:
+            raise SaveError(self._problem(error))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        try:
+            self._file.close()
+        except OSError as error:
+            if kind is None:
+                raise SaveError(self._problem(error))
 
 
 class Page:
@@ -176,9 +214,10 @@ class Fetcher:
 
 
 def download(url, destination, user_agent=DEFAULT_USER_AGENT, verify_certificate=True, timeout=300,
-             max_bytes=MAX_DOWNLOAD_BYTES):
+             max_bytes=MAX_DOWNLOAD_BYTES, max_seconds=MAX_DOWNLOAD_SECONDS):
     """Download one address to a file. Raises FetchError (and leaves no partial file) if it fails, if the
-    server closes the connection before the whole file has arrived, or if the file is larger than max_bytes.
+    server closes the connection before the whole file has arrived, if the file is larger than max_bytes
+    or if it takes longer than max_seconds. Raises SaveError if the file cannot be written on this computer.
 
     Target servers often have expired or self-signed certificates, so the caller can switch the
     certificate check off for them.
@@ -209,11 +248,16 @@ def download(url, destination, user_agent=DEFAULT_USER_AGENT, verify_certificate
             # A server may compress the file on the way although it was not asked to
             unpacker = zlib.decompressobj(16 + zlib.MAX_WBITS) if _is_gzip(response) else None
             received = written = 0
-            with open(partial, "wb") as target:
+            started = time.monotonic()
+            with _SavedFile(partial, destination) as target:
                 while True:
-                    block = response.read(1 << 16)
+                    # read1 hands over what has arrived instead of waiting for a full block, so that the
+                    # time limit is looked at even when a server sends a byte now and then
+                    block = response.read1(1 << 16)
                     if not block:
                         break
+                    if time.monotonic() - started > max_seconds:
+                        raise FetchError("the download took longer than %d minutes" % (max_seconds // 60))
                     received += len(block)
                     if unpacker is not None:
                         block = unpacker.decompress(block)
@@ -225,7 +269,10 @@ def download(url, destination, user_agent=DEFAULT_USER_AGENT, verify_certificate
                 raise FetchError("the connection closed after %d of %d bytes" % (received, expected))
             if unpacker is not None and not unpacker.eof:
                 raise FetchError("the compressed file is cut off")
-        os.replace(partial, destination)
+        try:
+            os.replace(partial, destination)
+        except OSError as error:
+            raise SaveError("%s could not be written (%s)" % (destination, error))
     except urllib.error.HTTPError as error:
         reason, status = _reason(error), error.code
         error.close()

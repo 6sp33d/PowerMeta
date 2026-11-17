@@ -11,7 +11,7 @@ import sys
 import time
 
 from . import __version__, exif, links, sources
-from .web import DEFAULT_USER_AGENT, PROGRAM_USER_AGENT, FetchError, Fetcher, download
+from .web import DEFAULT_USER_AGENT, PROGRAM_USER_AGENT, FetchError, Fetcher, SaveError, download
 
 SOURCES = ("archive", "bing", "duckduckgo")
 BROWSER_ENGINES = ("google", "bing", "duckduckgo")
@@ -40,6 +40,15 @@ def ask_yes_no(question):
             return True
         if answer in ("n", "no"):
             return False
+
+
+def ask_person(question):
+    """Put a question of the browser search to the person at the keyboard. Without a terminal nobody can
+    be asked: that is said, and EOFError tells the caller to go on without an answer."""
+    if sys.stdin is None or not sys.stdin.isatty():
+        log("%sNot asked, because there is no terminal." % question)
+        raise EOFError
+    return input(question)
 
 
 def _name_list(text, allowed, option, parser):
@@ -83,12 +92,15 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
 
         # An engine that is searched through the browser is not also asked with plain requests
         engines = [name for name in ("bing", "duckduckgo") if name in http_sources and name not in browser_engines]
+        # One session per search engine, so that the cookies it sets are sent back as a browser would
+        bing = Fetcher(user_agent or DEFAULT_USER_AGENT)
+        duckduckgo = Fetcher(user_agent or DEFAULT_USER_AGENT)
         duckduckgo_blocked = False
         first = True
         # Bing is first asked for the site alone. If it does not keep to the site, it is not asked for files.
         if "bing" in engines:
             first = False
-            if not sources.bing_knows_site(Fetcher(user_agent or DEFAULT_USER_AGENT), domain, log):
+            if not sources.bing_knows_site(bing, domain, log):
                 engines.remove("bing")
         for file_type in file_types:
             ask_bing = "bing" in engines
@@ -101,13 +113,11 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
             first = False
 
             if ask_bing:
-                for link in sources.search_bing(Fetcher(user_agent or DEFAULT_USER_AGENT), domain, file_type, max_pages, delay, log):
+                for link in sources.search_bing(bing, domain, file_type, max_pages, delay, log):
                     keep(link)
             if ask_duckduckgo:
                 # DuckDuckGo is left alone for the rest of the run once it has refused to answer
-                result, duckduckgo_blocked = sources.search_duckduckgo(
-                    Fetcher(user_agent or DEFAULT_USER_AGENT), domain, file_type, max_pages, delay, log
-                )
+                result, duckduckgo_blocked = sources.search_duckduckgo(duckduckgo, domain, file_type, max_pages, delay, log)
                 for link in result:
                     keep(link)
 
@@ -116,8 +126,8 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
 
             # Each link is handed over as soon as it is found, so that nothing is lost if the search is cut short
             found_in_browser = browser.search(
-                browser_engines, domain, file_types, max_pages, delay, browser_name, log, on_link=keep,
-                lookup=google_lookup, user_agent=user_agent, save_pages=save_pages,
+                browser_engines, domain, file_types, max_pages, delay, browser_name, log, ask=ask_person,
+                on_link=keep, lookup=google_lookup, user_agent=user_agent, save_pages=save_pages,
             )
             for link in found_in_browser:
                 keep(link)
@@ -163,21 +173,29 @@ def download_files(file_links, output_dir, user_agent=None, archive_copies=None,
         log("Now Downloading %s" % link)
         problem = None
         try:
-            # Target servers often have expired or self-signed certificates, so certificate errors are
-            # ignored for them - and only for them
-            download(link, destination, user_agent or DEFAULT_USER_AGENT, verify_certificate=False)
-        except FetchError as error:
-            problem = str(error)
-
-        # A file that is gone from the site may still be in the Internet Archive
-        if problem and archive_copies and link in archive_copies:
-            log("[*] Not available from the site (%s). Trying the copy in the Internet Archive." % problem)
-            time.sleep(1)
             try:
-                download(archive_copies[link], destination, user_agent or PROGRAM_USER_AGENT, verify_certificate=True)
-                problem = None
+                # Target servers often have expired or self-signed certificates, so certificate errors are
+                # ignored for them - and only for them
+                download(link, destination, user_agent or DEFAULT_USER_AGENT, verify_certificate=False)
             except FetchError as error:
                 problem = str(error)
+
+            # A file that is gone from the site may still be in the Internet Archive
+            if problem and archive_copies and link in archive_copies:
+                log("[*] Not available from the site (%s). Trying the copy in the Internet Archive." % problem)
+                time.sleep(1)
+                try:
+                    download(archive_copies[link], destination, user_agent or PROGRAM_USER_AGENT, verify_certificate=True)
+                    problem = None
+                except FetchError as error:
+                    problem = str(error)
+        except SaveError as error:
+            # This computer cannot store the file (disk full, folder not writable). The next file would
+            # fare no better, and neither the site nor the Internet Archive has anything to do with it.
+            left = len(file_links) - downloaded - failed
+            log("[!] %s. The downloads stop here: %d files were not downloaded." % (error, left))
+            failed += left
+            break
 
         if problem:
             log("[!] Could not download %s : %s" % (link, problem))
@@ -230,6 +248,24 @@ def read_link_list(path):
     encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
     lines = raw.decode(encoding, errors="replace").splitlines()
     return [links.plain_ascii(line.strip()) for line in lines if line.strip()]
+
+
+def _cannot_use_folder(path):
+    """Why files cannot be put in this folder (which may still have to be made), or None."""
+    path = os.path.abspath(path)
+    if os.path.exists(path) and not os.path.isdir(path):
+        return "it is not a folder"
+    # The nearest folder that exists is the one that decides
+    while not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            return "it cannot be made"
+        path = parent
+    if not os.path.isdir(path):
+        return "%s is not a folder" % path
+    if not os.access(path, os.W_OK):
+        return "%s is not writable" % path
+    return None
 
 
 def _cannot_write(path):
@@ -339,12 +375,24 @@ def _run(argv):
         parser.error("the target domain is required: -d targetdomain.com (or a list of links: --list-in FILE)")
     if args.max_pages < 1:
         parser.error("--max-pages must be at least 1")
+    if not 0 <= args.delay <= 3600:  # also turns away "nan" and "inf"
+        parser.error("--delay must be between 0 and 3600 seconds")
     file_types = links.parse_file_types(args.types)
+    for entry in args.types.split(","):
+        if entry.strip() and entry.strip().lstrip(".").lower() not in file_types:
+            log("[!] '%s' is not a file type and is left out. File types are given as a comma separated list such as \"pdf, docx\"." % entry.strip())
     if not file_types:
         log('[!] No file types to search for. Pass a comma separated list such as "pdf, docx".')
         return 1
+    # A search can take a long time: find out now, not afterwards, that its result cannot be stored
+    if args.output_dir:
+        problem = _cannot_use_folder(args.output_dir)
+        if problem:
+            log("[!] The output directory %s cannot be used: %s." % (args.output_dir, problem))
+            return 1
 
     archive_copies = {}
+    listed = True  # False while the links that were found exist nowhere but in this run
     if args.list_in:
         # If a list of links was given, use that instead of searching
         if not os.path.isfile(args.list_in):
@@ -364,7 +412,6 @@ def _run(argv):
             return 1
         http_sources = _name_list(args.sources, SOURCES, "--sources", parser)
         browser_engines = _name_list(args.browser, BROWSER_ENGINES, "--browser", parser)
-        # A search can take a long time: find out now, not afterwards, that its result cannot be saved
         if args.list_out:
             problem = _cannot_write(args.list_out)
             if problem:
@@ -379,10 +426,12 @@ def _run(argv):
         log()
 
         saved = bool(args.list_out and file_links) and write_link_list(args.list_out, file_links)
+        # With --list-out the links are in the file, or were printed when it could not be written
+        listed = bool(args.list_out)
         if interrupted:
             if saved:
                 log("[*] To download these files later, run again with: --list-in \"%s\"" % args.list_out)
-            elif file_links and not args.list_out:
+            elif file_links and not listed:
                 log("[*] The links found so far (use --list-out FILE to have them written to a file):")
                 for link in file_links:
                     log(link)
@@ -401,6 +450,10 @@ def _run(argv):
             downloaded, failed = download_files(file_links, output_dir, args.user_agent or None, archive_copies, file_types)
         except OSError as error:
             log("[!] The output directory %s cannot be used: %s" % (output_dir, error))
+            if not listed:
+                log("[*] The links that were found (use --list-out FILE to have them written to a file):")
+                for link in file_links:
+                    log(link)
             return 1
         if downloaded == 0:
             # Every download failed: there is nothing to extract metadata from

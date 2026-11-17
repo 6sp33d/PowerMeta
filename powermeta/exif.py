@@ -113,22 +113,29 @@ def extract_authors(path, folder):
         for tag in ("Author", "Creator"):
             value = record.get(tag)
             for item in value if isinstance(value, list) else [value]:
-                text = "" if item is None else str(item).strip()
+                # One value, one line: a value with line breaks could pass for lines of this program's output
+                text = "" if item is None else " ".join(str(item).split())
                 if text:
                     values.add(text)
     return len(records), sorted(values, key=lambda text: (text.lower(), text))
 
 
 _NUMBER = re.compile(r"[+-]?[0-9]+(?:[.,][0-9]+)?")
+# Where a spreadsheet program that splits the file on semicolons, tabs or line breaks (as Excel does in
+# many countries) would see a cell begin with = + - or @
+_INNER_START = re.compile(r"""(?<=[;\t\r\n])(?=[ "]*[=+\-@])""")
 
 
 def inert_cell(cell):
     """A spreadsheet program runs a cell that starts with = + - or @ as a formula, and the metadata comes
     from downloaded files. Such a cell gets an apostrophe in front, which makes it plain text. Plain
-    numbers such as -5 or +0.3 are left as they are."""
-    if cell[:1] in ("=", "+", "-", "@", "\t", "\r", "\n") and not _NUMBER.fullmatch(cell):
-        return "'" + cell
-    return cell
+    numbers such as -5 or +0.3 are left as they are. The same is done inside a cell, after a semicolon,
+    a tab or a line break: some spreadsheet programs start a new cell there."""
+    if _NUMBER.fullmatch(cell):
+        return cell
+    if cell[:1] in ("=", "+", "-", "@", "\t", "\r", "\n"):
+        cell = "'" + cell
+    return _INNER_START.sub("'", cell)
 
 
 def extract_all_to_csv(path, folder, csv_path):

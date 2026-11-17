@@ -148,6 +148,9 @@ $csvIn = (@('SourceFile,Author,Comment', 'a.pdf,=1+1,"@SUM(A1), ""quoted"""', 'b
 $csvOut = (@('SourceFile,Author,Comment', "a.pdf,'=1+1,`"'@SUM(A1), `"`"quoted`"`"`"", 'b.pdf,-5,"two', 'lines, one cell"', "c.pdf,+0.3,'-1+cmd") -join "`n")
 Assert-Equal 'Formula cells in the CSV are made plain text, numbers and other cells are kept' (ConvertTo-PowerMetaInertCsv -Text $csvIn) $csvOut
 Assert-Equal 'An empty CSV stays empty' (ConvertTo-PowerMetaInertCsv -Text '') ''
+Assert-Equal 'A formula behind a semicolon inside a cell is made plain text' (ConvertTo-PowerMetaInertCsv -Text 'a.pdf,x;=1+1,Writer') "a.pdf,x;'=1+1,Writer"
+Assert-Equal 'A formula on the second line of a cell is made plain text' (ConvertTo-PowerMetaInertCsv -Text ("a.pdf,`"x`n=1+1`",Writer")) ("a.pdf,`"x`n'=1+1`",Writer")
+Assert-Equal 'A list with semicolons is left alone' (ConvertTo-PowerMetaInertCsv -Text 'a.pdf,one;two;3,Writer') 'a.pdf,one;two;3,Writer'
 
 Write-Host ""
 Write-Host "Metadata extraction"

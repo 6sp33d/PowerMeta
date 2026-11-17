@@ -73,9 +73,17 @@ def search_archive(fetcher, domain, file_types, max_results=10000, log=print):
 
 
 BING_OTHER_SITES = (
-    "[!] Bing answered the search for '%s' with pages of other sites only. It does this when it takes a "
-    "search for an automated one, or does not know the site. Nothing from such an answer is kept, and "
-    "Bing is left out for the rest of this run."
+    "[!] Bing answered the search for '%s' with pages of other sites (%d of its %d results are on the site). "
+    "It does this when it takes a search for an automated one, or does not know the site. Nothing from "
+    "such an answer is kept, and Bing is left out for the rest of this run."
+)
+BING_NO_RESULTS = (
+    "[!] Bing returned no results for '%s': it has no pages of the site, or it did not answer the search "
+    "(a check page looks the same to this program). It is left out for the rest of this run."
+)
+BING_NO_FILES = (
+    "[!] Bing showed pages of other sites only for '%s': it has no %s files of the site, or it has stopped "
+    "keeping to the site."
 )
 
 
@@ -94,13 +102,13 @@ def bing_knows_site(fetcher, domain, log=print):
     except FetchError as error:
         log("[!] Bing did not answer (%s). It is left out for the rest of this run." % error)
         return False
-    on_domain = sum(1 for href in links.links_from_html(page.text) if links.is_on_domain(links.unwrap_bing(href) or "", domain))
-    if on_domain:
+    results, on_domain, keeps_to_site = links.bing_keeps_to_site(page.text, domain)
+    if keeps_to_site:
         return True
-    if links.count_bing_results(page.text):
-        log(BING_OTHER_SITES % query)
+    if results:
+        log(BING_OTHER_SITES % (query, on_domain, results))
     else:
-        log("[*] Bing has no pages of %s. It is left out for the rest of this run." % domain)
+        log(BING_NO_RESULTS % query)
     return False
 
 
@@ -133,7 +141,7 @@ def search_bing(fetcher, domain, file_type, max_pages=5, delay=2, log=print):
 
     # Bing fills the page with other sites when it has nothing on the site for a search
     if results_seen > 0 and on_domain_seen == 0:
-        log("[*] Bing showed pages of other sites only for this search, so it has no %s files of %s." % (file_type, domain))
+        log(BING_NO_FILES % (query, file_type))
     log("[*] Bing: %d %s files found" % (len(found), file_type))
     return found
 

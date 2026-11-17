@@ -25,6 +25,9 @@ class InputHandling(unittest.TestCase):
             "targetdomain.com.": "targetdomain.com",
             "user@targetdomain.com:8443": "targetdomain.com",
             "http://targetdomain.com:8080/": "targetdomain.com",
+            # The form the search engines and the Internet Archive use for a name with other letters
+            "Bücher.de": "xn--bcher-kva.de",
+            "https://www.bücher.example/x": "www.xn--bcher-kva.example",
         }
         for typed, expected in cases.items():
             self.assertEqual(links.host_from_target(typed), expected, typed)
@@ -255,6 +258,10 @@ class Pages(unittest.TestCase):
         self.assertEqual(links.links_from_html("<a " * 20000), [])
         self.assertIsNone(links.duckduckgo_next_form("<form>" * 20000))
         self.assertLess(time.time() - started, 5)
+
+    def test_a_tag_that_is_never_finished_hides_what_follows_as_in_a_browser(self):
+        self.assertEqual(links.links_from_html('<a href="/one">1</a><a href="/two" title="the page ends here'), ["/one"])
+        self.assertEqual(links.links_from_html('<a href="/one">1</a><!-- a comment that never ends <a href="/two">2</a>'), ["/one"])
 
     def test_the_older_reader_is_used_when_the_parser_gives_up(self):
         from .support import patched

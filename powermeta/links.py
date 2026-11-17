@@ -49,14 +49,24 @@ def parse_file_types(text):
 
 
 def host_from_target(target):
-    """Reduce "https://www.TargetDomain.com/path" or "*.targetdomain.com" to a bare host name."""
+    """Reduce "https://www.TargetDomain.com/path" or "*.targetdomain.com" to a bare host name.
+
+    A name with letters outside ASCII (bücher.de) is given in the form the search engines and the
+    Internet Archive use for it (xn--bcher-kva.de).
+    """
     name = str(target or "").strip().lower()
     name = re.sub(r"^[a-z][a-z0-9+.\-]*://", "", name)
     name = re.sub(r"[/?#].*$", "", name)
     name = re.sub(r"^.*@", "", name)
     name = re.sub(r":\d+$", "", name)
     name = re.sub(r"^\*\.", "", name)
-    return name.strip(".")
+    name = name.strip(".")
+    if not name.isascii():
+        try:
+            name = name.encode("idna").decode("ascii")
+        except UnicodeError:
+            pass
+    return name
 
 
 def is_valid_host(host):
@@ -70,7 +80,9 @@ class _PageReader(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.links = []
         self.forms = []
+        self.bing_results = []  # the first link of each element with class "b_algo"
         self._form = None
+        self._in_result = False
 
     def handle_starttag(self, tag, attrs):
         if tag == "a":
@@ -78,7 +90,12 @@ class _PageReader(HTMLParser):
                 if name == "href":
                     if value:
                         self.links.append(value)
+                        if self._in_result:
+                            self.bing_results.append(value)
+                            self._in_result = False
                     break
+        elif tag == "li":
+            self._in_result = "b_algo" in (dict(attrs).get("class") or "").split()
         elif tag == "form":
             self._form = {}
             self.forms.append(self._form)
@@ -90,14 +107,18 @@ class _PageReader(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "form":
             self._form = None
+        elif tag == "li":
+            self._in_result = False
 
 
 def _read_page(page):
     """The links and forms of a page, or None if the page cannot be read as HTML."""
     reader = _PageReader()
     try:
+        # The parser is not told that the page has ended. Then it leaves a tag that is never finished
+        # alone, as a browser does, instead of looking for its end again and again (which took older
+        # Python versions a very long time on a page made of such tags).
         reader.feed(page or "")
-        reader.close()
     except Exception:  # before Python 3.10 the parser gives up on some malformed markup
         return None
     return reader
@@ -317,6 +338,28 @@ def safe_file_name(link, file_types=DEFAULT_FILE_TYPES):
 def count_bing_results(page):
     """Each organic Bing result sits in an element with class "b_algo"."""
     return len(re.findall(r'class="b_algo[ "]', page or ""))
+
+
+def bing_results(page):
+    """The address of each organic Bing result on a page (unwrapped; None for one that cannot be read)."""
+    reader = _read_page(page)
+    if reader is not None:
+        hrefs = reader.bing_results
+    else:
+        hrefs = [html.unescape(href) for href in re.findall(r'class="b_algo[ "][^>]*>.*?<a\s[^>]*?href="([^"]*)"', page or "", re.S)]
+    return [unwrap_bing(href) for href in hrefs]
+
+
+def bing_keeps_to_site(page, domain):
+    """Whether a page of Bing results is an answer to a "site:" search for the domain.
+
+    Returns (number of results, how many of them are on the domain, verdict). An answer that keeps to the
+    site has results of that site only; Bing answers some searches with other sites instead. One stray
+    result does not decide either way: the verdict is True when most results are on the domain.
+    """
+    results = bing_results(page)
+    on_domain = sum(1 for address in results if address and is_on_domain(address, domain))
+    return len(results), on_domain, bool(results) and on_domain * 2 > len(results)
 
 
 def count_duckduckgo_results(page):

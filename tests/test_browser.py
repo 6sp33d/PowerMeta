@@ -125,6 +125,11 @@ class InARealBrowser(unittest.TestCase):
     def setUp(self):
         self.profile = tempfile.mkdtemp(prefix="powermeta-browser-test-")
         self.addCleanup(shutil.rmtree, self.profile, ignore_errors=True)
+        # Where the browser would save a download. Whatever a test does, nothing may ever arrive here.
+        self.downloads = tempfile.mkdtemp(prefix="powermeta-browser-test-downloads-")
+        self.addCleanup(shutil.rmtree, self.downloads, ignore_errors=True)
+        self.addCleanup(self.nothing_was_saved)
+        self.arguments = list(ARGUMENTS)
         # What the stand-in puts in the way until the "person" has dealt with it
         self.check_pending = {"google": False, "duckduckgo": False, "link": False, "continue": False}
         self.checks_clear = True  # False: a check stays, whatever the person does
@@ -146,9 +151,21 @@ class InARealBrowser(unittest.TestCase):
             "direct": "<p><a href='%s/files/direct.pdf'><h3>a plain result link</h3></a></p>" % target,
             "wrapped": "<p><a href='/url?q=%s/files/wrapped.pdf&sa=U'><h3>an old-style wrapped link</h3></a></p>" % quote(target),
         }
+        # A result named "blank-..." opens in a new window; "moving-..." has its link changed by the
+        # page at the moment it is clicked
         rows = "".join(
-            kinds.get(kind, "<p><a href='/goto?url=%s' ping='/ping'><h3>a result that hides its address</h3></a></p>" % kind)
+            kinds.get(
+                kind,
+                "<p><a href='/goto?url=%s' ping='/ping'%s><h3>a result that hides its address</h3></a></p>"
+                % (kind, " target='_blank'" if kind.startswith("blank-") else ""),
+            )
             for kind in self.google_links
+        )
+        rows += (
+            "<script>document.addEventListener('mousedown', function (event) {"
+            "  var a = event.target.closest('a');"
+            "  if (a && a.href.indexOf('url=moving-') > 0 && a.href.indexOf('&ved=') < 0) a.href += '&ved=abc';"
+            "}, true);</script>"
         )
         return (
             "<html><title>results</title><body>" + SEARCH_BOX + rows + "<a href='/search?q=x&start=10'>Next</a>"
@@ -163,6 +180,8 @@ class InARealBrowser(unittest.TestCase):
                 return (200, CHECK_PAGE)
             if self.check_pending["continue"]:
                 return (200, CONTINUE_PAGE)
+            if request.query.get("shown") == ["again"]:
+                return (200, "<html><body>" + SEARCH_BOX + "<a href='http://other.example/ad.pdf'>sponsored</a></body></html>")
             if self.google_moves and "moved" not in request.query:
                 return (302, "", {"Location": "/search?moved=1&start=%s&q=x" % request.query.get("start", ["0"])[0]})
             if request.query.get("start", ["0"])[0] != "0":
@@ -207,6 +226,24 @@ class InARealBrowser(unittest.TestCase):
                 if self.check_pending["continue-link"]:
                     return (200, CONTINUE_PAGE)
                 return (302, "", {"Location": target + "/files/continued.pdf"})
+            if token.startswith("help-"):
+                # A page with a button that also links to another site: that link is not the result
+                return (200, "<html><body>Before you continue <button>Continue</button> <a href='http://help.example/why'>Why am I seeing this?</a></body></html>")
+            if token.startswith("again-"):
+                # Sent back to a results page, which holds one link to another site
+                return (302, "", {"Location": "/search?shown=again"})
+            if token.startswith("elsewhere-"):
+                # A check on another of the search engine's hosts
+                if self.check_pending["elsewhere"]:
+                    return (302, "", {"Location": "http://ipv4.google.zz:%d/sorry/index" % self.server.port})
+                return (302, "", {"Location": target + "/files/%s.pdf" % token})
+            if token == "trap":
+                # A page of the search engine that fills the history, so that going back does not leave it
+                return (200, "<html><body><script>history.pushState({}, '', '/t1'); history.pushState({}, '', '/t2'); history.pushState({}, '', '/t3');</script>one moment</body></html>")
+            if token == "slow-forward":
+                return (200, "<html><head><meta http-equiv='refresh' content='1;url=%s/files/slowly.pdf'></head><body>You are being sent on</body></html>" % target)
+            if token.startswith(("blank-", "moving-")):
+                return (302, "", {"Location": target + "/files/%s.pdf" % token})
             # Any other link shows a page and leads nowhere
             return (200, "<html><title>wait</title><body>Your request is being verified</body></html>")
         if request.path == "/sorry/index":
@@ -216,6 +253,8 @@ class InARealBrowser(unittest.TestCase):
             if "first" not in request.query:  # the search for the site alone
                 if self.bing_site_answer == "site":
                     return (200, bing_page([target + "/", target + "/about.html", "http://other.example/"]))
+                if self.bing_site_answer == "home page among others":
+                    return (200, bing_page([target + "/"] + ["http://other-%d.example/" % number for number in range(9)]))
                 return (200, bing_page(["http://other.example/", "http://unrelated.example/x.pdf"] if self.bing_site_answer == "others" else []))
             if request.query["first"][0] == "1":
                 return (200, bing_page([target + "/files/b1.pdf", target + "/page.html", "http://other.example/x.pdf"]))
@@ -263,6 +302,10 @@ class InARealBrowser(unittest.TestCase):
                 self.check_pending[name] = False
         return ""
 
+    def nothing_was_saved(self):
+        time.sleep(0.3)
+        self.assertEqual(os.listdir(self.downloads), [], "the browser saved a file")
+
     @property
     def target(self):
         return "http://localhost:%d" % self.server.port
@@ -271,6 +314,7 @@ class InARealBrowser(unittest.TestCase):
         """Point the browser module at the stand-in. Returns the context manager that undoes it."""
         self.server = server
         self.check_pending.setdefault("continue-link", False)
+        self.check_pending.setdefault("elsewhere", False)
         outer = self
 
         class Recorded(browser.Session):
@@ -283,9 +327,11 @@ class InARealBrowser(unittest.TestCase):
             GOOGLE_URL=server.url + "/search",
             BING_URL=server.url + "/bing",
             DUCKDUCKGO_URL=server.url + "/html/",
-            EXTRA_ARGUMENTS=ARGUMENTS,
+            EXTRA_ARGUMENTS=self.arguments,
+            EXTRA_PREFERENCES={"download.default_directory": self.downloads},
             PROFILE_FOLDER=self.profile,
-            LOOKUP_WAIT=2,
+            LOOKUP_WAIT=3,
+            CLICK_WAIT=1,
             SHOWN_WAIT=0.5,
             Session=Recorded,
         )
@@ -362,6 +408,59 @@ class InARealBrowser(unittest.TestCase):
         self.assertEqual(self.lookups(requests), ["T1", "page", "T2"])
         # Each search page was asked for once (and sent on once); no lookup made the search run again
         self.assertEqual(sum(1 for request in requests if request.path == "/search"), 8)
+
+    def test_a_result_is_asked_for_once_however_its_link_behaves(self):
+        # Results that would open in a new window, and results whose link the page changes at the moment
+        # of the click: each is still read from one click, and never opened a second time in a tab
+        self.google_links = ["blank-1", "moving-1", "T1", "blank-2", "moving-2"]
+        found, requests = self.run_search(["google"], ["pdf"])
+        target = self.target
+        self.assertEqual(
+            sorted(found),
+            sorted(target + "/files/%s.pdf" % name for name in ("blank-1", "moving-1", "hidden", "blank-2", "moving-2")),
+        )
+        self.assertEqual(self.lookups(requests), ["blank-1", "moving-1", "T1", "blank-2", "moving-2"])
+        for request in requests:
+            if request.path == "/goto":
+                self.assertIn("/search?", request.headers.get("Referer", ""))
+        self.assertNotIn("could not be clicked", self.log())
+        self.assertEqual(self.questions, [])
+
+    def test_a_result_that_cannot_be_clicked_is_opened_in_a_tab_and_this_is_said(self):
+        # Something lies over the whole page
+        self.google_extras = "<div style='position:fixed;top:0;left:0;width:100%;height:100%;z-index:9;background:white'>a notice</div>"
+        self.google_links = ["T1", "T2"]
+        found, requests = self.run_search(["google"], ["pdf", "docx"])
+        self.assertEqual(sorted(found), [self.target + "/files/hidden.pdf", self.target + "/files/report.docx"])
+        self.assertEqual(self.lookups(requests), ["T1", "T2"])
+        self.assertEqual(sum(1 for message in self.messages if "could not be clicked in the results page" in message), 1)
+
+    def test_a_link_on_a_page_in_the_way_is_not_taken_for_the_result(self):
+        # A page with a button and a "why am I seeing this" link to another site; and a results page,
+        # shown again, that holds one link to another site
+        self.google_links = ["help-1", "again-1", "T1"]
+        found, requests = self.run_search(["google"], ["pdf"])
+        self.assertEqual(found, [self.target + "/files/hidden.pdf"])
+        self.assertEqual(len(self.questions), 2)
+        self.assertIn("The address behind 2 Google results was not read.", self.log())
+        # Only the address that was really read is remembered
+        self.assertEqual(list(self.sessions[-1]._resolved.values()), [self.target + "/files/hidden.pdf"])
+
+    def test_a_check_on_another_host_of_the_search_engine_waits_for_the_person(self):
+        # The name below does not exist; the browser is told to find it on this machine, and to use no proxy
+        self.arguments += ["--host-resolver-rules=MAP ipv4.google.zz 127.0.0.1", "--no-proxy-server"]
+        self.check_pending["elsewhere"] = True
+        self.google_links = ["elsewhere-1", "elsewhere-2"]
+        found, requests = self.run_search(["google"], ["pdf"])
+        self.assertEqual(sorted(found), [self.target + "/files/elsewhere-1.pdf", self.target + "/files/elsewhere-2.pdf"])
+        self.assertEqual(len(self.questions), 1)
+        self.assertIn("Google is showing a check in the browser window", self.questions[0])
+
+    def test_a_page_that_sends_the_browser_on_by_itself_needs_nobody(self):
+        self.google_links = ["slow-forward", "T1"]
+        found, _ = self.run_search(["google"], ["pdf"])
+        self.assertEqual(sorted(found), [self.target + "/files/hidden.pdf", self.target + "/files/slowly.pdf"])
+        self.assertEqual(self.questions, [])
 
     def test_a_page_of_the_search_engine_in_the_way_waits_for_the_person(self):
         # The result link shows a page with a button first. Nobody is hurried: the question comes when
@@ -483,6 +582,11 @@ class InARealBrowser(unittest.TestCase):
         found, requests = self.run_search(["google"], ["pdf", "docx"], lookup="request", user_agent="Example/1.0")
         self.assertEqual(len(found), 4)
         self.assertIn("Google does not tell plain requests where its result links lead (HTTP 200 and no redirect)", self.log())
+        # What is announced is what is done: plain requests for the first search, clicks for the second
+        self.assertEqual(
+            [message.split("(")[1] for message in self.messages if message.startswith("[*] Reading where")],
+            ["with plain requests to Google's links)", "each is clicked in the browser window)"],
+        )
         agents = [request.headers.get("User-Agent") for request in requests if request.path == "/goto"]
         # Two requests were turned away; after that, and for those two, the results were clicked
         self.assertEqual(agents.count("Example/1.0"), 2)
@@ -493,6 +597,26 @@ class InARealBrowser(unittest.TestCase):
         self.assertEqual(sorted(found), [self.target + "/files/direct.pdf", self.target + "/files/wrapped.pdf"])
         self.assertEqual(self.lookups(requests), [])
         self.assertIn("The address behind 2 Google results was not read.", self.log())
+
+    def test_with_nobody_to_ask_the_search_carries_on_where_it_can(self):
+        # No terminal: an empty first page is taken for a page without results, a page in the way of a
+        # result stops the lookups, and a check leaves the search engine out
+        def nobody(question):
+            self.questions.append(question)
+            raise EOFError
+
+        self.answer = nobody
+        self.google_links = ["direct", "dead-1", "T1"]
+        self.bing_site_answer = "nothing"
+        self.check_pending["duckduckgo"] = True
+        found, requests = self.run_search(["bing", "google", "duckduckgo"], ["pdf", "docx"])
+        self.assertEqual(found, [self.target + "/files/direct.pdf"])
+        self.assertEqual(len(self.questions), 3)
+        self.assertEqual(self.lookups(requests), ["dead-1"])
+        self.assertIn("[*] Results that hide their address are left out for the rest of this run.", self.messages)
+        self.assertIn("[*] DuckDuckGo is skipped for the rest of this run.", self.messages)
+        self.assertNotIn("[*] Google is skipped for the rest of this run.", self.messages)
+        self.assertIn("Searching Google for 'site:localhost filetype:docx' in the browser", self.log())
 
     def test_a_check_waits_for_the_person_and_then_carries_on(self):
         self.check_pending["google"] = True
@@ -573,11 +697,19 @@ class InARealBrowser(unittest.TestCase):
         self.bing_site_answer = "others"
         found, requests = self.run_search(["bing", "duckduckgo"], ["pdf", "docx"])
         self.assertEqual(sum(1 for request in requests if request.path == "/bing"), 1)
-        self.assertIn("with pages of other sites only", self.log())
+        self.assertIn("with pages of other sites (0 of its 2 results are on the site)", self.log())
         self.assertNotIn("filetype:pdf' in the browser\n[*] Now Analyzing page 1 of Bing", self.log())
         self.assertEqual(self.questions, [])
         # The other search engine was still asked
         self.assertIn(self.target + "/files/d1.pdf", found)
+
+    def test_bing_is_left_out_when_the_site_is_one_result_among_others(self):
+        # The site's own home page among nine other sites is what an answer that ignores "site:" looks like
+        self.bing_site_answer = "home page among others"
+        found, requests = self.run_search(["bing"], ["pdf", "docx"])
+        self.assertEqual(found, [])
+        self.assertEqual(sum(1 for request in requests if request.path == "/bing"), 1)
+        self.assertIn("with pages of other sites (1 of its 10 results are on the site)", self.log())
 
     def test_bing_is_left_out_when_it_has_nothing_on_the_site(self):
         self.bing_site_answer = "nothing"
@@ -585,7 +717,7 @@ class InARealBrowser(unittest.TestCase):
         self.assertEqual(found, [])
         self.assertEqual(sum(1 for request in requests if request.path == "/bing"), 1)
         self.assertEqual(len(self.questions), 1)
-        self.assertIn("[*] Bing has no pages of localhost. It is left out for the rest of this run.", self.messages)
+        self.assertIn("Bing returned no results for 'site:localhost'", self.log())
 
     def test_duckduckgo_next_button_and_check(self):
         self.check_pending["duckduckgo"] = True
@@ -688,6 +820,25 @@ class InARealBrowser(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             self.run_search(["google"], ["pdf"], on_link=handed_over.append)
         self.assertEqual(handed_over, [self.target + "/files/direct.pdf"])
+
+    def test_ctrl_c_during_a_lookup_asks_nothing_more_of_the_search_engine(self):
+        # The window is on a page of the search engine that going back does not leave. Without Ctrl+C the
+        # search would be opened again to get the results back; on the way out it must not be.
+        self.google_links = ["trap"]
+
+        def interrupt(question):
+            self.questions.append(question)
+            self.seen_before = len(self.server.requests)
+            raise KeyboardInterrupt
+
+        self.answer = interrupt
+        with LocalServer(self.respond) as server:
+            with self.started(server):
+                with self.assertRaises(KeyboardInterrupt):
+                    browser.search(["google"], "localhost", ["pdf"], delay=0, log=self.messages.append, ask=lambda question: self.answer(question))
+            after = [request.path for request in server.requests[self.seen_before:] if request.path != "/favicon.ico"]
+        self.assertEqual(len(self.questions), 1)
+        self.assertEqual(after, [])
 
     def test_an_error_that_was_not_foreseen_ends_the_browser_search_only(self):
         def broken(session, domain, file_type, max_pages, delay):

@@ -9,7 +9,7 @@ For many organizations it's common to find publicly available files posted on th
 | Search source | State | Notes |
 |---|---|---|
 | Internet Archive | Used by default | Asks the Wayback Machine's index, a service made to be queried by programs, which addresses it has captured on the domain (up to 10,000). One request covers all file types. It lists files it has seen at any time, so some may be gone from the site; when such a file cannot be downloaded in the same run, PowerMeta fetches the Archive's first copy of it instead. A list saved with `-OutputList` holds only the addresses on the site, so this does not happen with `-TargetFileList`. |
-| Bing | Used by default | Bing hides each result behind a redirect link; PowerMeta decodes these. Bing does not always keep to `site:`: when it does not know a site, and when it takes a search for an automated one, it answers with pages of other sites, without saying so. Nothing from another site is ever kept. The Python version first asks Bing for `site:targetdomain.com` alone and leaves Bing out for the run if no result of that search is on the site; the PowerShell version tells you for each file type. |
+| Bing | Used by default | Bing hides each result behind a redirect link; PowerMeta decodes these. Bing does not always keep to `site:`: when it does not know a site, and when it takes a search for an automated one, it answers with pages of other sites, without saying so. Nothing from another site is ever kept. The Python version first asks Bing for `site:targetdomain.com` alone and leaves Bing out for the run unless most results of that search are on the site; the PowerShell version tells you for each file type. |
 | DuckDuckGo | Used by default | Uses DuckDuckGo's script-free results page. DuckDuckGo answers scripts from many networks with a bot check or an error instead of results. PowerMeta tells you when that happens and leaves DuckDuckGo alone for the rest of the run. |
 | Google result pages | Python version only, in a browser window | Google no longer answers plain web requests, and its result pages no longer contain the addresses of the results. The Python version can run the searches in a browser window that you watch (`--browser`). See [Google](#google). |
 | Google Custom Search JSON API (`PowerMeta-API.ps1`) | Existing customers only, until January 1, 2027 | Google has closed this API to new customers and discontinues it on January 1, 2027. See [Google API](#google-api). |
@@ -35,9 +35,9 @@ PowerMeta uses [ExifTool](https://exiftool.org/) by Phil Harvey to extract metad
 
 On Windows, run `Install-ExifTool` once. It downloads the current official ExifTool package, checks it against the SHA-256 checksum published on exiftool.org, and puts `exiftool.exe` and its `exiftool_files` folder next to `PowerMeta.ps1`. You can also install ExifTool yourself: PowerMeta looks for it next to `PowerMeta.ps1` and on the PATH, and refuses versions older than 12.24. It no longer looks in the current directory, because that may be a folder of downloaded files. On Linux or macOS install it with your package manager.
 
-By default PowerMeta just extracts the 'Author' and 'Creator' fields as these commonly have usernames saved. However all metadata for files can be extracted by passing PowerMeta the -ExtractAllToCsv flag. The values in that CSV come straight from the target's documents, and a spreadsheet program runs a cell that starts with `=`, `+`, `-` or `@` as a formula. PowerMeta therefore puts an apostrophe in front of such a cell, which makes it plain text (plain numbers such as `-5` are left as they are).
+By default PowerMeta just extracts the 'Author' and 'Creator' fields as these commonly have usernames saved. However all metadata for files can be extracted by passing PowerMeta the -ExtractAllToCsv flag. The values in that CSV come straight from the target's documents, and a spreadsheet program runs a cell that starts with `=`, `+`, `-` or `@` as a formula. PowerMeta therefore puts an apostrophe in front of such a cell, which makes it plain text (plain numbers such as `-5` are left as they are). It does the same inside a value after a semicolon, a tab or a line break, because some spreadsheet programs start a new cell there.
 
-A downloaded file is saved under the last part of its address, and the name always ends in one of the file types that were asked for. The site cannot choose another ending: `setup.exe?doc=.pdf` is saved as `setup.exe.pdf`, `get.php?file=report.pdf` as `get.php.pdf`, and a name that matches no wanted type (possible with `-TargetFileList`) gets `.download` added.
+A downloaded file is saved under the last part of its address, and a name with an ending always ends in one of the file types that were asked for. The site cannot choose another ending: `setup.exe?doc=.pdf` is saved as `setup.exe.pdf`, `get.php?file=report.pdf` as `get.php.pdf`, and a name whose ending is no wanted type gets `.download` added. A name without any ending is kept as it is. The wanted types are those of `-FileTypes` (`-t`) in the same run, also with `-TargetFileList` (`--list-in`): to download a list of `.odt` files under their own names, pass `-FileTypes odt`.
 
 Target servers often have expired or self-signed certificates, so certificate errors are ignored while files are downloaded from them (and only then). Copies fetched from the Internet Archive are checked as usual.
 
@@ -122,7 +122,7 @@ Run it with (`PowerMeta.ps1` must be in the same folder):
 The API returns at most 100 results per file type, and the free tier allows 100 queries per day.
 
 ## Python Version
-The folder `powermeta` holds the same tool in Python (3.7 or later). It needs no extra packages for a normal run, and it has one thing the PowerShell version does not: it can run the searches in a real browser window.
+The folder `powermeta` holds the same tool in Python (3.7 or later; tested with 3.8 and 3.11 to 3.14). It needs no extra packages for a normal run, and it has one thing the PowerShell version does not: it can run the searches in a real browser window.
 
 ``` PowerShell
 PS C:\> python -m powermeta -d targetdomain.com
@@ -157,9 +157,9 @@ Both versions use the same ExifTool: next to `PowerMeta.ps1`, or on the PATH.
 
 Some things the Python version does differently:
 - Unless `--user-agent` says otherwise, the Internet Archive is told that the requests come from PowerMeta (`PowerMeta/2.0.0`); the search engines and the target site are sent a browser-like User-Agent, as in the PowerShell version.
-- A download that the server cuts off is not kept (the Internet Archive's copy is tried instead), and no file larger than 2 GB is downloaded.
+- A download that the server cuts off is not kept (the Internet Archive's copy is tried instead). No file larger than 2 GB is downloaded, and no download may take longer than 30 minutes.
 - Ctrl+C during the search stops the run but keeps what was found: the links are written to the `--list-out` file, or printed if there is none, and can be downloaded later with `--list-in`.
-- The exit code is 0 when the run did what was asked, 1 when nothing could be downloaded or the metadata could not be extracted, and 130 after Ctrl+C.
+- The exit code is 0 when the run finished (also when it found nothing, or when a search engine or the browser could not be used); 1 when the input was not usable, the output folder or link list could not be written, nothing could be downloaded, or the metadata could not be extracted; 2 for a wrong option; 130 after Ctrl+C.
 
 ### Searching In A Browser Window
 Google no longer answers scripts at all, and Bing and DuckDuckGo turn them away on many networks. With `--browser` the Python version opens a normal Chrome or Edge window and runs the searches there. When a search engine shows a check ("are you a robot"), a consent box or a button that has to be pressed first, PowerMeta stops and asks you to deal with it in the window, then carries on.
@@ -175,13 +175,13 @@ What to expect:
 - You have to be there. PowerMeta never answers a check itself, and does nothing to hide that the browser is automated: the browser shows its "controlled by automated test software" notice and tells the pages so. A search engine may keep showing checks or refuse altogether; type `s` at the prompt to leave it out.
 - The search engines' terms do not allow automated searching. Expect checks, and possibly a temporary block of your network by a search engine. Do not sign in to an account in that window.
 - The browser keeps its own profile in a folder named `.powermeta` in your home folder, so a consent box you have answered stays answered.
-- Bing is first asked for `site:targetdomain.com` alone. If it answers with pages of other sites only (see the table above), it is left out for the run.
+- Bing is first asked for `site:targetdomain.com` alone. Unless most results of that search are on the site (see the table above), it is left out for the run.
 - The browser mode is tested against local stand-ins for the three search engines. How the real ones react differs between networks and changes over time; `--save-pages DIR` keeps a copy of every page PowerMeta read, which shows what it was given. A saved search page can hold your IP address or location.
 
 #### Google's hidden addresses
 A Google result does not show its address (see [Google](#google)), so PowerMeta has to ask Google's link where it leads, one result at a time. `--google-lookup` says how:
 
-- `click` (the default): each result is clicked in the results page, the way you would click it, and the browser's network log shows where the click leads. No tab is opened, and the window stays on the results: a document is not opened or saved by the click. If a result leads to a web page instead of a document, the window shows that page for a moment and goes back. The site is asked for the file by this click, as it is when you click a result yourself. Only if a result cannot be clicked is its link opened in a second tab.
+- `click` (the default): each result is clicked in the results page, the way you would click it, and the browser's network log shows where the click leads. No tab is opened, and the window stays on the results: a document is not opened or saved by the click. If a result leads to a web page instead of a document, the window shows that page for a moment and goes back; if going back does not bring the results back, the search is opened once more. The site is asked for the file by this click, as it is when you click a result yourself. Only if a result cannot be clicked (for example because something in the window covers the results) is its link opened in a second tab; PowerMeta says so when that happens.
 - `request`: Google's link is asked with a plain web request instead, without the browser, and only the redirect is read (the file itself is not asked for). This is the quietest way, and the one that keeps furthest from Google's rules: its `robots.txt` asks programs not to request these links. The requests say that they come from PowerMeta unless `--user-agent` is given. If Google does not answer them with a redirect, PowerMeta says so and clicks the results instead.
 - `off`: results that hide their address are left out. Only results whose address is in the page are kept.
 
@@ -210,7 +210,7 @@ PS C:\> .\Test-PowerMeta.ps1 -Live -TargetDomain targetdomain.com
 ## PowerMeta Options
 ```
 TargetDomain        - The target domain to search for files.
-FileTypes           - A comma seperated list of file extensions to search for. By default PowerMeta searches for "pdf, docx, xlsx, doc, xls, pptx, ppt".
+FileTypes           - A comma seperated list of file extensions to search for. By default PowerMeta searches for "pdf, docx, xlsx, doc, xls, pptx, ppt". Downloaded files keep their name only if it ends in one of these types (also with TargetFileList).
 OutputList          - A file to output the list of links discovered through web searching to.
 OutputDir           - A directory to store all downloaded files in.
 TargetFileList      - List of file links to download. When this is given no searching is done.
