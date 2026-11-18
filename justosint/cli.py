@@ -18,13 +18,21 @@ BROWSER_ENGINES = ("google", "bing", "duckduckgo")
 SOURCE_NAMES = {"archive": "Internet Archive", "bing": "Bing", "duckduckgo": "DuckDuckGo", "google": "Google"}
 
 # Control characters, and the characters that reverse the direction of text
-_UNPRINTABLE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f‪-‮⁦-⁩]")
+_UNPRINTABLE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 
 
 def log(message=""):
     # Much of what is printed comes from outside: addresses, metadata, the error text of a server.
     # None of it may steer the terminal, so control characters are shown as "?".
     print(_UNPRINTABLE.sub("?", str(message)), flush=True)
+
+
+def counted(count, noun="file", verb=False):
+    """A number with its noun: "1 file", "3 files". With verb: "1 file was", "3 files were"."""
+    text = "%d %s" % (count, noun if count == 1 else noun + "s")
+    if verb:
+        text += " was" if count == 1 else " were"
+    return text
 
 
 def log_settings(rows):
@@ -193,7 +201,7 @@ def download_files(file_links, output_dir, user_agent=None, archive_copies=None,
 
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-    log("[*] Downloading %d files to %s" % (len(file_links), os.path.abspath(output_dir)))
+    log("[*] Downloading %s to %s" % (counted(len(file_links)), os.path.abspath(output_dir)))
 
     downloaded = failed = 0
     for link in file_links:
@@ -229,7 +237,7 @@ def download_files(file_links, output_dir, user_agent=None, archive_copies=None,
             # This computer cannot store the file (disk full, folder not writable). The next file would
             # fare no better, and neither the site nor the Internet Archive has anything to do with it.
             left = len(file_links) - downloaded - failed
-            log("[!] %s. The downloads stop here: %d files were not downloaded." % (error, left))
+            log("[!] %s. The downloads stop here: %s not downloaded." % (error, counted(left, verb=True)))
             failed += left
             break
 
@@ -239,7 +247,7 @@ def download_files(file_links, output_dir, user_agent=None, archive_copies=None,
         else:
             downloaded += 1
 
-    log("%s Downloaded %d files to %s (%d failed)." % ("[+]" if downloaded else "[-]", downloaded, os.path.abspath(output_dir), failed))
+    log("%s Downloaded %s to %s (%d failed)." % ("[+]" if downloaded else "[-]", counted(downloaded), os.path.abspath(output_dir), failed))
     return downloaded, failed
 
 
@@ -262,26 +270,26 @@ def extract_metadata(folder, csv_path=None):
             if count == 0:
                 log("[-] ExifTool found no metadata in %s." % folder)
                 return True, "none found"
-            log("[+] Metadata for %d files was written to %s" % (count, csv_path))
-            return True, "all fields of %d files, in %s" % (count, csv_path)
+            log("[+] Metadata for %s was written to %s" % (counted(count), csv_path))
+            return True, "all fields of %s, in %s" % (counted(count), csv_path)
 
         count, values = exif.extract_authors(path, folder)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         log("[!] Metadata extraction failed: %s" % error)
         return False, ""
 
-    log("[*] ExifTool read %d files." % count)
+    log("[*] ExifTool read %s." % counted(count))
     log()
     if not values:
         log("[-] No 'Author' or 'Creator' metadata was found.")
         log()
         return True, "no 'Author' or 'Creator' values"
-    log("[+] Extracted 'Author' and 'Creator' metadata (%d values)" % len(values))
+    log("[+] Extracted 'Author' and 'Creator' metadata (%s)" % counted(len(values), "value"))
     log()
     for value in values:
         log("    " + value)
     log()
-    return True, "%d 'Author' and 'Creator' values" % len(values)
+    return True, "%d 'Author' and 'Creator' %s" % (len(values), "value" if len(values) == 1 else "values")
 
 
 def read_link_list(path):
@@ -447,7 +455,7 @@ def _run(argv):
         subject = args.list_in
         log_settings([("Link list", args.list_in), ("File types", ", ".join(file_types))])
         log()
-        log("%s A total of %d files were found in the list." % ("[+]" if file_links else "[-]", len(file_links)))
+        log("%s A total of %s found in the list." % ("[+]" if file_links else "[-]", counted(len(file_links), verb=True)))
         summary.append(("Links in the list", len(file_links)))
     else:
         domain = links.host_from_target(args.domain)
@@ -477,7 +485,7 @@ def _run(argv):
         log()
         if tallies:
             log_table("[*] Files found, by source", tallies, numbers=True)
-        log("%s A total of %d files were discovered on %s." % ("[+]" if file_links else "[-]", len(file_links), domain))
+        log("%s A total of %s discovered on %s." % ("[+]" if file_links else "[-]", counted(len(file_links), verb=True), domain))
         log()
         summary.append(("Files found", len(file_links)))
 

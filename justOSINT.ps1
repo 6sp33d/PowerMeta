@@ -32,10 +32,25 @@ function Write-JustOSINTBanner {
     Write-Output ''
 }
 
-#The line that says what a source gave: "[+] Bing: 3 pdf files found" or "[-] Bing: no pdf files found"
+#A number with its noun: "1 file", "3 files". With -Verb: "1 file was", "3 files were"
+function Get-JustOSINTCount {
+    param([int]$Count, [string]$Noun = 'file', [switch]$Verb)
+
+    $text = [string]$Count + ' ' + $Noun
+    if ($Count -ne 1) { $text += 's' }
+    if ($Verb)
+        {
+        if ($Count -eq 1) { $text += ' was' } else { $text += ' were' }
+        }
+    return $text
+}
+
+#The line that says what a source gave: "[+] Bing: 3 pdf files found", "[+] Bing: 1 pdf file found" or
+#"[-] Bing: no pdf files found"
 function Get-JustOSINTTally {
     param([string]$Source, [int]$Count, [string]$What = 'files')
 
+    if ($Count -eq 1 -and $What.EndsWith('files')) { $What = $What.Substring(0, $What.Length - 1) }
     if ($Count -gt 0) { return ('[+] ' + $Source + ': ' + $Count + ' ' + $What + ' found') }
     return ('[-] ' + $Source + ': no ' + $What + ' found')
 }
@@ -289,7 +304,7 @@ Function Invoke-JustOSINT{
             Write-Output ''
             $marker = '[+]'
             if ($targetlinks.Count -eq 0) { $marker = '[-]' }
-            Write-Output ($marker + ' A total of ' + $targetlinks.Count + " files were discovered on $domain.")
+            Write-Output ($marker + ' A total of ' + (Get-JustOSINTCount -Count $targetlinks.Count -Verb) + " discovered on $domain.")
             Write-Output ''
 
             #If an OutputList is specified write the results to disk
@@ -314,7 +329,7 @@ Function Invoke-JustOSINT{
         Write-Output ''
         $marker = '[+]'
         if ($targetlinks.Count -eq 0) { $marker = '[-]' }
-        Write-Output ($marker + ' A total of ' + $targetlinks.Count + ' files were found in the list.')
+        Write-Output ($marker + ' A total of ' + (Get-JustOSINTCount -Count $targetlinks.Count -Verb) + ' found in the list.')
         }
 
     if ($targetlinks.Count -eq 0)
@@ -1102,7 +1117,7 @@ public static class JustOSINTTrustAllCertificates {
 
         $marker = '[+]'
         if ($downloaded -eq 0) { $marker = '[-]' }
-        Write-Output "$marker Downloaded $downloaded files to $OutputPath ($failed failed)."
+        Write-Output ($marker + ' Downloaded ' + (Get-JustOSINTCount -Count $downloaded) + " to $OutputPath ($failed failed).")
 }
 
 #Finds exiftool next to this script or on the PATH. The current directory is deliberately not searched:
@@ -1311,7 +1326,7 @@ Function ExtractMetadata{
             }
         $uniquemeta = @($allmeta | Sort-Object -Unique)
 
-        Write-Output ('[*] ExifTool read ' + $records.Count + ' files.')
+        Write-Output ('[*] ExifTool read ' + (Get-JustOSINTCount -Count $records.Count) + '.')
         Write-Output ''
         if ($uniquemeta.Count -eq 0)
             {
@@ -1319,7 +1334,7 @@ Function ExtractMetadata{
             }
         else
             {
-            Write-Output ("[+] Extracted 'Author' and 'Creator' metadata (" + $uniquemeta.Count + ' values)')
+            Write-Output ("[+] Extracted 'Author' and 'Creator' metadata (" + (Get-JustOSINTCount -Count $uniquemeta.Count -Noun 'value') + ')')
             Write-Output ''
             foreach ($value in $uniquemeta) { Write-Output ('    ' + $value) }
             }

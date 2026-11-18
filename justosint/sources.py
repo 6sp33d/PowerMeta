@@ -20,7 +20,10 @@ ARCHIVE_INDEX_URL = "https://web.archive.org/cdx/search/cdx"
 
 
 def tally(source, count, what="files"):
-    """The line that says what a source gave: "[+] Bing: 3 pdf files found" or "[-] Bing: no pdf files found"."""
+    """The line that says what a source gave: "[+] Bing: 3 pdf files found", "[+] Bing: 1 pdf file found"
+    or "[-] Bing: no pdf files found"."""
+    if count == 1 and what.endswith("files"):
+        what = what[:-1]
     if count:
         return "[+] %s: %d %s found" % (source, count, what)
     return "[-] %s: no %s found" % (source, what)
