@@ -77,6 +77,15 @@ _ALL_LINKS = "return Array.prototype.map.call(document.querySelectorAll('a[href]
 # (a form, a button) is not such a page
 _NOTICE_LINKS = "if (document.querySelector('form, button, input[type=submit], input[type=button]')) return [];" + _ALL_LINKS
 _FORWARDS = re.compile(r"<meta\b[^<>]*http-equiv=[\"']?refresh", re.I)
+# The browser's own error page ("This site can't be reached", "This page isn't working") is not a page
+# of the site: it has an address of a kind of its own, and names the reason in one of its elements.
+# Chrome and Edge show it when a request got no answer, an answer without a page, or one that cannot be
+# trusted - and not each of these makes the command that opened the page fail.
+_ERROR_PAGE = (
+    "if (!/-error:$/.test(location.protocol)) return null;"
+    "var reason = document.querySelector('.error-code, #error-code');"
+    "return 'error page ' + (reason ? reason.textContent : '');"
+)
 
 _NOT_OPENED = object()  # the browser never asked for the link
 
@@ -296,7 +305,29 @@ class Session:
                 self.log("[!] The browser could not open %s: %s" % (url, _first_line(error)))
             return False
         self._settle()
-        return not self.gone
+        if self.gone:
+            return False
+        # Not every failure makes the command fail: after some the window just shows the browser's error page
+        problem = self._error_page()
+        if problem is None:
+            return not self.gone
+        self.log("[!] The browser could not open %s: %s" % (url, problem))
+        return False
+
+    def _error_page(self):
+        """Whether the window shows the browser's own error page instead of a page of the site: the
+        request got no answer, or none with a page. Returns a few words on it, or None if the window
+        shows a page of the site. Such a page holds no results, and must not be read as one that says
+        there are none."""
+        try:
+            shown = self.driver.execute_script(_ERROR_PAGE)
+        except self._errors as error:
+            self._failed(error)
+            return None
+        if not isinstance(shown, str):
+            return None
+        reason = " ".join(shown[len("error page "):].split())[:60]
+        return "it shows an error page of its own" + (" (%s)" % reason if reason else "")
 
     def _settle(self, seconds=20):
         """Wait until the page in the window has finished loading."""
@@ -337,7 +368,7 @@ class Session:
     def press_form(self, offset):
         """Press the form on the page whose offset field ("s") has this value, and wait for the page it
         leads to. Only a form that leads back to the same site is pressed. Returns True if a new page
-        has been loaded."""
+        of the site has been loaded."""
         try:
             old_page = self.driver.find_element("tag name", "html")
             pressed = self.driver.execute_script(
@@ -364,7 +395,8 @@ class Session:
                 old_page.is_enabled()
             except self._stale:
                 self._settle()
-                return not self.gone
+                # What replaced the old page may be the browser's error page: the request got no answer
+                return self._error_page() is None and not self.gone
             except self._errors as error:
                 self._failed(error)
                 return False
@@ -439,17 +471,21 @@ class Session:
 
     def _back_to(self, engine, url, in_the_way=None):
         """After the person has dealt with a check the browser normally lands back on the results.
-        If it is somewhere else, or the window still shows the check, open the search again."""
+        If it is somewhere else, or the window still shows the check, open the search again. Returns
+        False if the window does not show a page of the search engine in the end."""
         self._settle()
         if self.gone:
             return False
+        # What came after the check may be the browser's own error page: the request got no answer
+        no_page = self._error_page() is not None
         if url is None:
-            return True
+            # There is no address to open again: the page came from a form
+            return not no_page and not self.gone
         if in_the_way is None:
             blocked = page_state(engine, self.url(), self.source()) == "check"
         else:
             blocked = in_the_way()
-        if _host(self.url()) != _host(url) or blocked:
+        if _host(self.url()) != _host(url) or blocked or no_page:
             return self._go(url)
         return not self.gone
 
@@ -1063,15 +1099,13 @@ def search_duckduckgo(session, domain, file_type, max_pages=5, delay=2):
                 break
             if delay > 0:
                 time.sleep(delay)
-            if not session.press_form(next_form["s"]):
-                if not session.gone:
+            # A check can also come up on a later page
+            if not session.press_form(next_form["s"]) or not session.clear_check("duckduckgo"):
+                gap = _not_shown(session, "duckduckgo", page_number + 1)
+                if gap:
                     log("[!] The next page of DuckDuckGo's results could not be opened. The results so far are kept.")
-                    gap = "part"
                 break
             offset = int(next_form["s"])
-            # A check can also come up on a later page
-            if not session.clear_check("duckduckgo"):
-                break
 
     session.unanswered.setdefault("duckduckgo", []).append(gap)
     log(sources.tally("DuckDuckGo (browser)", len(found), "%s files" % file_type))

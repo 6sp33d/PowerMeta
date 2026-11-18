@@ -396,17 +396,38 @@ def _cannot_write(path):
 
 
 def write_link_list(path, file_links):
-    """Write the links to a file. Returns False, after printing them instead, if that fails."""
+    """Write the links to a file. Returns None, or why the file could not be written."""
     try:
         with open(path, "w", encoding="ascii", errors="replace", newline="\n") as target:
             target.write("\n".join(file_links) + "\n")
-        log("[+] The links were written to %s" % path)
-        return True
     except OSError as error:
-        log("[!] The links could not be written to %s (%s). They are listed here instead:" % (path, error))
+        return str(error)
+    return None
+
+
+def store_links(list_out, file_links, interrupted, summary):
+    """What a search does with the links it found, so that they outlast the run: they are written to
+    the file that was asked for with --list-out. If that fails they are printed instead, and so they
+    are after an interrupted search without such a file, which ends the run. Adds the row for the link
+    list to summary. Returns False if a list that was asked for could not be written."""
+    if list_out and file_links:
+        problem = write_link_list(list_out, file_links)
+        if problem is not None:
+            # The row comes first: printing thousands of links takes a while, and Ctrl+C may end it
+            summary.append(("Link list", "could not be written"))
+            log("[!] The links could not be written to %s (%s). They are listed here instead:" % (list_out, problem))
+            for link in file_links:
+                log("    " + link)
+            return False
+        log("[+] The links were written to %s" % list_out)
+        summary.append(("Link list", list_out))
+        if interrupted:
+            log("[*] To download these files later, run again with: --list-in \"%s\"" % list_out)
+    elif interrupted and file_links:
+        log("[*] The links found so far (use --list-out FILE to have them written to a file):")
         for link in file_links:
             log("    " + link)
-        return False
+    return True
 
 
 def build_parser():
@@ -467,7 +488,8 @@ def main(argv=None):
     try:
         return _run(argv)
     except KeyboardInterrupt:
-        # Ctrl+C before there is anything to sum up (or once more while the summary is being printed)
+        # Ctrl+C before there is anything to sum up, in the instant between the end of the search and
+        # what follows it, or once more while the summary is being printed
         log()
         log("[!] Interrupted.")
         return 130
@@ -507,6 +529,7 @@ def _run(argv):
     archive_copies = {}
     tallies = []
     listed = True  # False while the links that were found exist nowhere but in this run
+    searched = interrupted = False
     summary = []
 
     def finish(status):
@@ -559,29 +582,23 @@ def _run(argv):
         log("%s A total of %s discovered on %s." % ("[+]" if file_links else "[-]", counted(len(file_links), verb=True), domain))
         log()
         summary.append(("Files found", "%d (the search was interrupted)" % len(file_links) if interrupted else len(file_links)))
-
-        saved = bool(args.list_out and file_links) and write_link_list(args.list_out, file_links)
-        if saved:
-            summary.append(("Link list", args.list_out))
+        searched = True
         # With --list-out the links are in the file, or were printed when it could not be written
         listed = bool(args.list_out)
-        if interrupted:
-            if saved:
-                log("[*] To download these files later, run again with: --list-in \"%s\"" % args.list_out)
-            elif file_links and not listed:
-                log("[*] The links found so far (use --list-out FILE to have them written to a file):")
-                for link in file_links:
-                    log("    " + link)
-            return finish(130)
 
     # What follows the search can be cut short with Ctrl+C as well. The run still ends with the summary.
+    list_written = True
     try:
-        status = _download_and_extract(args, file_links, archive_copies, file_types, listed, summary)
+        if searched:
+            list_written = store_links(args.list_out, file_links, interrupted, summary)
+        # An interrupted search ends the run: nothing is downloaded
+        status = 130 if interrupted else _download_and_extract(args, file_links, archive_copies, file_types, listed, summary)
     except KeyboardInterrupt:
         log()
         log("[!] Interrupted.")
         status = 130
-    return finish(status)
+    # A link list that could not be written is something that was asked for and could not be done
+    return finish(status or (0 if list_written else 1))
 
 
 def _download_and_extract(args, file_links, archive_copies, file_types, listed, summary):

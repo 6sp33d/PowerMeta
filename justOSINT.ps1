@@ -468,7 +468,10 @@ Function Invoke-JustOSINT{
                     }
                 catch
                     {
-                    #The links are in no file now: they are shown, so that they are not lost
+                    #The summary names the step that did not work. The links are in no file now: they
+                    #are shown, so that they are not lost.
+                    $summaryNames.Add('Link list')
+                    $summaryValues.Add('could not be written')
                     Write-Output "[!] The links could not be written to $OutputList ($($_.Exception.Message)). They are listed here instead:"
                     foreach ($link in $targetlinks) { Write-Output ('    ' + $link) }
                     }
@@ -575,6 +578,13 @@ Function Invoke-JustOSINT{
 
     if ($null -ne $downloadResult)
         {
+        #Nothing could be downloaded at all. Links that are in no file and were not shown are shown
+        #now, so that the search does not have to be run again.
+        if ([string]$downloadResult['Problem'] -ne '' -and $TargetFileList -eq '' -and $OutputList -eq '')
+            {
+            Write-Output '[*] The links that were found (use -OutputList FILE to have them written to a file):'
+            foreach ($link in $targetlinks) { Write-Output ('    ' + $link) }
+            }
         $value = [string]($downloadResult['Downloaded'])
         if ([string]$downloadResult['Problem'] -ne '') { $value = $value + ' (' + $downloadResult['Problem'] + ')' }
         elseif ([int]$downloadResult['Failed'] -gt 0) { $value = $value + ' (' + $downloadResult['Failed'] + ' failed)' }

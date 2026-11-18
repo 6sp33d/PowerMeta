@@ -99,7 +99,7 @@ Lines are marked `[*]` for what is being done, `[+]` for something found, `[-]` 
 
 Every run that searches, or reads a list of links, ends with this summary, made to fit in one screenshot. That includes a run that finds nothing or downloads nothing and, in the Python version, a run that is stopped with Ctrl+C.
 
-- The rows at the top say what was done. A step that was asked for and did not work is named as well, for example `Metadata : could not be extracted`.
+- The rows at the top say what was done. A step that was asked for and did not work is named as well, for example `Link list : could not be written` or `Metadata : could not be extracted`.
 - **Files by type** lists every file type that was asked for, with the number of files found. A file counts as the type it is saved as. With `--list-in` (`-TargetFileList`), links that would not be saved as one of these types are counted in a last row, `other`.
 - **Files by source** says how many different files each source gave. Two sources often know the same file, so these numbers can add up to more than the total; the summary says so when they do. A source that did not get through carries a remark:
 
@@ -140,6 +140,7 @@ What to expect:
 - The search engines' terms do not allow automated searching. Expect checks, and possibly a temporary block of your network by a search engine. Do not sign in to an account in that window.
 - The browser keeps its own profile in a folder named `.justosint` in your home folder, so a consent box you have answered stays answered.
 - Bing is first asked for `site:targetdomain.com` alone. Unless most results of that search are on the site (see the table above), it is left out for the run.
+- When the browser cannot show a results page (the connection fails, or the answer is an error without a page), justOSINT says so and carries on with the next search, and the summary marks that search engine with one of the remarks above.
 - Nothing is saved by the browser. The files are downloaded afterwards, by justOSINT itself, if you ask for that.
 
 ### Google
