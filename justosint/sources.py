@@ -29,12 +29,24 @@ def tally(source, count, what="files"):
     return "[-] %s: no %s found" % (source, what)
 
 
-def tally_row(source, count, stopped=False, remark=""):
+def tally_row(source, count, stopped=False, remark="", unanswered=()):
     """What a source gave, for the summary of a run: (name, number of files, remark). The remark is empty
-    unless the source did not get through. For a source that was stopped it says "stopped early", or
-    "left out" if nothing had come of it by then."""
-    if stopped and not remark:
-        remark = "stopped early" if count else "left out"
+    unless the source did not get through.
+
+    A source that was stopped (it was left out, it refused and was skipped, or the search was cut short)
+    is marked "stopped early", or "left out" if nothing had come of it by then. For a source that was
+    asked to the end, unanswered says for each of its searches what was left unanswered ("" nothing,
+    "all" of it, "part" of it): the remark is "did not answer" when not one search was answered and
+    "incomplete" when some of it was not.
+    """
+    if not remark:
+        unanswered = list(unanswered)
+        if stopped:
+            remark = "stopped early" if count else "left out"
+        elif unanswered and all(entry == "all" for entry in unanswered):
+            remark = "did not answer"
+        elif any(unanswered):
+            remark = "incomplete"
     return (source, count, remark)
 
 
@@ -132,10 +144,15 @@ def bing_knows_site(fetcher, domain, log=print):
 
 
 def search_bing(fetcher, domain, file_type, max_pages=5, delay=2, log=print):
-    """Search Bing for "site:domain filetype:type" and return the matching file links."""
+    """Search Bing for "site:domain filetype:type".
+
+    Returns (links, unanswered): unanswered is "" when Bing answered every request, "all" when it did
+    not answer the search at all, and "part" when it stopped answering at a later page.
+    """
     found = []
     query = "site:%s filetype:%s" % (domain, file_type)
     first, results_seen, on_domain_seen = 1, 0, 0
+    unanswered = ""
 
     log("[*] Searching Bing for '%s'" % query)
     for page_number in range(1, max_pages + 1):
@@ -146,6 +163,7 @@ def search_bing(fetcher, domain, file_type, max_pages=5, delay=2, log=print):
             page = fetcher.get(BING_URL + "?" + urllib.parse.urlencode({"q": query, "first": first}))
         except FetchError as error:
             log("[!] Bing did not answer for page %d: %s" % (page_number, error))
+            unanswered = "all" if page_number == 1 else "part"
             break
 
         results = links.count_bing_results(page.text)
@@ -162,21 +180,24 @@ def search_bing(fetcher, domain, file_type, max_pages=5, delay=2, log=print):
     if results_seen > 0 and on_domain_seen == 0:
         log(BING_NO_FILES % (query, file_type))
     log(tally("Bing", len(found), "%s files" % file_type))
-    return found
+    return found, unanswered
 
 
 def search_duckduckgo(fetcher, domain, file_type, max_pages=5, delay=2, log=print):
     """Search DuckDuckGo's script-free page for "site:domain filetype:type".
 
     DuckDuckGo wants the query as a form post, and gives each results page a "Next" form holding what to
-    post for the following page. Returns (links, blocked): blocked is True when DuckDuckGo refused to
-    answer (its bot check, or an error), in which case it should be left alone for the rest of the run.
+    post for the following page. Returns (links, blocked, unanswered): blocked is True when DuckDuckGo
+    refused to answer (its bot check, or an error), in which case it should be left alone for the rest of
+    the run. unanswered is "" when every request was answered with results, "all" when the search was not
+    answered at all, and "part" when a later page was not.
     """
     found = []
     query = "site:%s filetype:%s" % (domain, file_type)
     fields = {"q": query, "b": ""}
     offset, results_seen, on_domain_seen = 0, 0, 0
     blocked = False
+    unanswered = ""
 
     log("[*] Searching DuckDuckGo for '%s'" % query)
     for page_number in range(1, max_pages + 1):
@@ -191,6 +212,7 @@ def search_duckduckgo(fetcher, domain, file_type, max_pages=5, delay=2, log=prin
                 blocked = True
             else:
                 log("[!] DuckDuckGo did not answer for page %d (%s). The results so far are kept." % (page_number, error))
+            unanswered = "all" if page_number == 1 else "part"
             break
 
         if links.is_duckduckgo_bot_check(page.text):
@@ -199,6 +221,7 @@ def search_duckduckgo(fetcher, domain, file_type, max_pages=5, delay=2, log=prin
                 "requests from many networks; DuckDuckGo is skipped for the rest of this run."
             )
             blocked = True
+            unanswered = "all" if page_number == 1 else "part"
             break
 
         results = links.count_duckduckgo_results(page.text)
@@ -219,4 +242,4 @@ def search_duckduckgo(fetcher, domain, file_type, max_pages=5, delay=2, log=prin
     if results_seen > 0 and on_domain_seen == 0:
         log("[!] DuckDuckGo returned results, but none of them are on %s." % domain)
     log(tally("DuckDuckGo", len(found), "%s files" % file_type))
-    return found, blocked
+    return found, blocked, unanswered

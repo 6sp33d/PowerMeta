@@ -55,6 +55,32 @@ function Get-JustOSINTTally {
     return ('[-] ' + $Source + ': no ' + $What + ' found')
 }
 
+#The remark a source carries in the summary of a run; empty unless the source did not get through.
+#A source that was stopped (it refused and was skipped for the rest of the run) is marked "stopped early",
+#or "left out" if nothing had come of it by then. For a source that was asked to the end, -Unanswered says
+#for each of its searches what was left unanswered ('' nothing, 'all' of it, 'part' of it): the remark is
+#"did not answer" when not one search was answered, and "incomplete" when some of it was not.
+function Get-JustOSINTSourceRemark {
+    param([int]$Count = 0, [bool]$Stopped = $false, [string[]]$Unanswered = @())
+
+    if ($Stopped)
+        {
+        if ($Count -gt 0) { return 'stopped early' }
+        return 'left out'
+        }
+
+    $whole = 0
+    $some = 0
+    foreach ($entry in $Unanswered)
+        {
+        if ($entry -eq 'all') { $whole++ }
+        if ($entry -ne '') { $some++ }
+        }
+    if ($Unanswered.Count -gt 0 -and $whole -eq $Unanswered.Count) { return 'did not answer' }
+    if ($some -gt 0) { return 'incomplete' }
+    return ''
+}
+
 #The lines of a small table: one per name, with the values in a column of their own. With -Numbers the
 #values stand against the right edge of their column, as in a table of counts, and a row's remark, if it
 #has one, follows in parentheses.
@@ -326,9 +352,14 @@ Function Invoke-JustOSINT{
                 $archiveEntries = @(Search-JustOSINTArchive -Domain $domain -FileTypes $filetypearray -UserAgent $UserAgent -Remark ([ref]$archiveRemark))
                 }
 
-            #The different files each search engine gave, by the key of their link
+            #The different files each source gave, by the key of their link
+            $archiveKeys = New-Object System.Collections.Hashtable
             $bingKeys = New-Object System.Collections.Hashtable
             $duckDuckGoKeys = New-Object System.Collections.Hashtable
+
+            #For each search of a search engine, what it left unanswered: '', 'all' or 'part'
+            $bingUnanswered = New-Object System.Collections.Generic.List[string]
+            $duckDuckGoUnanswered = New-Object System.Collections.Generic.List[string]
 
             #The search engines are asked once per file type. DuckDuckGo is left alone for the rest of the
             #run once it has refused to answer.
@@ -348,14 +379,18 @@ Function Invoke-JustOSINT{
 
                 if ($askBing)
                     {
-                    $fromBing = @(Search-JustOSINTBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay)
+                    $gap = ''
+                    $fromBing = @(Search-JustOSINTBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay -Unanswered ([ref]$gap))
+                    $bingUnanswered.Add([string]$gap)
                     foreach ($link in $fromBing) { $bingKeys[[string](Get-JustOSINTLinkKey $link)] = $true }
                     $found += $fromBing
                     }
 
                 if ($askDuckDuckGo)
                     {
-                    $fromDuckDuckGo = @(Search-JustOSINTDuckDuckGo -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay -Blocked ([ref]$duckDuckGoBlocked))
+                    $gap = ''
+                    $fromDuckDuckGo = @(Search-JustOSINTDuckDuckGo -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay -Blocked ([ref]$duckDuckGoBlocked) -Unanswered ([ref]$gap))
+                    $duckDuckGoUnanswered.Add([string]$gap)
                     foreach ($link in $fromDuckDuckGo) { $duckDuckGoKeys[[string](Get-JustOSINTLinkKey $link)] = $true }
                     $found += $fromDuckDuckGo
                     }
@@ -376,6 +411,7 @@ Function Invoke-JustOSINT{
             foreach ($entry in $archiveEntries)
                 {
                 $key = Get-JustOSINTLinkKey $entry.Link
+                $archiveKeys[[string]$key] = $true
                 if (-not $linkByKey.ContainsKey($key))
                     {
                     $linkByKey[$key] = $entry.Link
@@ -397,26 +433,24 @@ Function Invoke-JustOSINT{
             $summaryNames.Add('Files found')
             $summaryValues.Add([string]($targetlinks.Count))
 
-            #What each source gave, for the summary. A source that did not get through gets a remark.
+            #What each source gave, for the summary: the number of different files, and a remark for a
+            #source that did not get through
             if ($SearchEngines -contains 'Archive')
                 {
                 $sourceRowNames.Add('Internet Archive')
-                $sourceRowCounts.Add([string]($archiveEntries.Count))
+                $sourceRowCounts.Add([string]($archiveKeys.Count))
                 $sourceRowRemarks.Add([string]$archiveRemark)
                 }
             if ($SearchEngines -contains 'Bing')
                 {
+                $remark = [string](Get-JustOSINTSourceRemark -Count $bingKeys.Count -Unanswered $bingUnanswered.ToArray())
                 $sourceRowNames.Add('Bing')
                 $sourceRowCounts.Add([string]($bingKeys.Count))
-                $sourceRowRemarks.Add('')
+                $sourceRowRemarks.Add($remark)
                 }
             if ($SearchEngines -contains 'DuckDuckGo')
                 {
-                $remark = ''
-                if ($duckDuckGoBlocked)
-                    {
-                    if ($duckDuckGoKeys.Count -gt 0) { $remark = 'stopped early' } else { $remark = 'left out' }
-                    }
+                $remark = [string](Get-JustOSINTSourceRemark -Count $duckDuckGoKeys.Count -Stopped $duckDuckGoBlocked -Unanswered $duckDuckGoUnanswered.ToArray())
                 $sourceRowNames.Add('DuckDuckGo')
                 $sourceRowCounts.Add([string]($duckDuckGoKeys.Count))
                 $sourceRowRemarks.Add($remark)
@@ -425,10 +459,19 @@ Function Invoke-JustOSINT{
             #If an OutputList is specified write the results to disk
             If ($OutputList -ne "" -and $targetlinks.Count -gt 0)
                 {
-                $targetlinks | Out-File -LiteralPath $OutputList -Encoding ascii
-                Write-Output "[+] The links were written to $OutputList"
-                $summaryNames.Add('Link list')
-                $summaryValues.Add($OutputList)
+                try
+                    {
+                    $targetlinks | Out-File -LiteralPath $OutputList -Encoding ascii -ErrorAction Stop
+                    Write-Output "[+] The links were written to $OutputList"
+                    $summaryNames.Add('Link list')
+                    $summaryValues.Add($OutputList)
+                    }
+                catch
+                    {
+                    #The links are in no file now: they are shown, so that they are not lost
+                    Write-Output "[!] The links could not be written to $OutputList ($($_.Exception.Message)). They are listed here instead:"
+                    foreach ($link in $targetlinks) { Write-Output ('    ' + $link) }
+                    }
                 }
 
         }
@@ -533,7 +576,8 @@ Function Invoke-JustOSINT{
     if ($null -ne $downloadResult)
         {
         $value = [string]($downloadResult['Downloaded'])
-        if ([int]$downloadResult['Failed'] -gt 0) { $value = $value + ' (' + $downloadResult['Failed'] + ' failed)' }
+        if ([string]$downloadResult['Problem'] -ne '') { $value = $value + ' (' + $downloadResult['Problem'] + ')' }
+        elseif ([int]$downloadResult['Failed'] -gt 0) { $value = $value + ' (' + $downloadResult['Failed'] + ' failed)' }
         $summaryNames.Add('Files downloaded')
         $summaryValues.Add($value)
         if ([int]$downloadResult['Downloaded'] -gt 0)
@@ -781,14 +825,17 @@ function Test-JustOSINTFileLink {
     return [regex]::IsMatch($uri.PathAndQuery, $pattern, 'IgnoreCase')
 }
 
-#Searches Bing for "site:domain filetype:type" and returns the matching file links
+#Searches Bing for "site:domain filetype:type" and returns the matching file links.
+#The [ref] passed as -Unanswered is told what Bing left unanswered: 'all' when it did not answer the search
+#at all, 'part' when it stopped answering at a later page.
 function Search-JustOSINTBing {
     param(
         [string]$Domain,
         [string]$FileType,
         [string]$UserAgent = "",
         [int]$MaxPages = 5,
-        [int]$DelaySeconds = 2
+        [int]$DelaySeconds = 2,
+        [ref]$Unanswered
     )
 
     $links = New-Object System.Collections.Generic.List[string]
@@ -806,7 +853,14 @@ function Search-JustOSINTBing {
 
         Write-Host "[*] Now Analyzing page $page of Bing search results"
         $html = Get-JustOSINTWebPage -Url "https://www.bing.com/search?q=$query&first=$first" -UserAgent $UserAgent -Session $session
-        if (-not $html) { break }
+        if (-not $html)
+            {
+            if ($null -ne $Unanswered)
+                {
+                if ($page -eq 1) { $Unanswered.Value = 'all' } else { $Unanswered.Value = 'part' }
+                }
+            break
+            }
 
         #Each organic result sits in an element with class "b_algo"
         $results = ([regex]::Matches($html, 'class="b_algo[ "]')).Count
@@ -847,6 +901,8 @@ function Search-JustOSINTBing {
 #Searches DuckDuckGo's script-free page (html.duckduckgo.com) for "site:domain filetype:type" and returns the matching file links.
 #DuckDuckGo wants the query as a form post, and gives each results page a "Next" form holding what to post for the following page.
 #If it answers with its bot check instead of results, the [ref] passed as -Blocked is set to $true.
+#The [ref] passed as -Unanswered is told what was left unanswered: 'all' when the search was not answered
+#at all, 'part' when a later page was not.
 function Search-JustOSINTDuckDuckGo {
     param(
         [string]$Domain,
@@ -854,7 +910,8 @@ function Search-JustOSINTDuckDuckGo {
         [string]$UserAgent = "",
         [int]$MaxPages = 5,
         [int]$DelaySeconds = 2,
-        [ref]$Blocked
+        [ref]$Blocked,
+        [ref]$Unanswered
     )
 
     $links = New-Object System.Collections.Generic.List[string]
@@ -881,6 +938,10 @@ function Search-JustOSINTDuckDuckGo {
                 Write-Host "[!] DuckDuckGo did not answer the search. It is skipped for the rest of this run."
                 if ($null -ne $Blocked) { $Blocked.Value = $true }
                 }
+            if ($null -ne $Unanswered)
+                {
+                if ($page -eq 1) { $Unanswered.Value = 'all' } else { $Unanswered.Value = 'part' }
+                }
             break
             }
 
@@ -892,6 +953,10 @@ function Search-JustOSINTDuckDuckGo {
             {
             Write-Host "[!] DuckDuckGo answered with its bot check instead of results. It does this to automated requests from some networks; DuckDuckGo is skipped for the rest of this run. Try again later or from another network."
             if ($null -ne $Blocked) { $Blocked.Value = $true }
+            if ($null -ne $Unanswered)
+                {
+                if ($page -eq 1) { $Unanswered.Value = 'all' } else { $Unanswered.Value = 'part' }
+                }
             break
             }
 
@@ -1175,7 +1240,7 @@ Function Get-TargetFiles{
         $FileTypes = @(),
 
         #Optional: a [ref] that is given what was done, for the summary of a run: a table with the
-        #entries Downloaded, Failed and Path.
+        #entries Downloaded, Failed, Path and Problem (empty unless nothing could be downloaded at all).
         [Parameter(Mandatory = $false)]
         [ref]
         $Result
@@ -1201,6 +1266,7 @@ Function Get-TargetFiles{
         If(-not (Test-Path -LiteralPath $OutputDir -PathType Container))
             {
                 Write-Output "[!] The output directory $OutputDir could not be created."
+                if ($null -ne $Result) { $Result.Value = @{ Downloaded = 0; Failed = 0; Path = ''; Problem = 'the output directory could not be used' } }
                 return
             }
 
@@ -1307,7 +1373,7 @@ public static class JustOSINTTrustAllCertificates {
         $marker = '[+]'
         if ($downloaded -eq 0) { $marker = '[-]' }
         Write-Output ($marker + ' Downloaded ' + (Get-JustOSINTCount -Count $downloaded) + " to $OutputPath ($failed failed).")
-        if ($null -ne $Result) { $Result.Value = @{ Downloaded = $downloaded; Failed = $failed; Path = $OutputPath } }
+        if ($null -ne $Result) { $Result.Value = @{ Downloaded = $downloaded; Failed = $failed; Path = $OutputPath; Problem = '' } }
 }
 
 #Finds exiftool next to this script or on the PATH. The current directory is deliberately not searched:
@@ -1425,6 +1491,9 @@ Function ExtractMetadata{
         [ref]
         $Summary
         )
+
+        #Until a step below has something better to say: every way out that is not a success leaves this
+        if ($null -ne $Summary) { $Summary.Value = 'could not be extracted' }
 
         if ($OutputDir -eq "" -or -not (Test-Path -LiteralPath $OutputDir -PathType Container))
             {

@@ -141,7 +141,8 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
     Returns (sorted links, {link: address of the Internet Archive's copy}, interrupted, tallies).
     interrupted is True if Ctrl+C ended the search early; what had been found by then is still returned.
     tallies says for each source what it gave: a list of (name, number of files, remark), where the
-    remark tells of a source that did not get through ("left out", "stopped early", "did not answer").
+    remark tells of a source that did not get through ("left out", "stopped early", "did not answer",
+    "incomplete": see sources.tally_row).
     """
     found, by_key, archive_copies = [], {}, {}
 
@@ -154,10 +155,12 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
             found.append(link)
         return by_key[key]
 
-    archive_entries, archive_remark = [], ""
-    from_bing, from_duckduckgo = set(), set()
+    archive_entries, archive_remark, archive_asked = [], "", False
+    from_archive, from_bing, from_duckduckgo = set(), set(), set()
     left_out = set()
-    done = set()  # the sources that were asked to the end
+    # For each search of a search engine that has ended, what it left unanswered ("", "all" or "part").
+    # An engine was asked to the end when there is an entry for every file type.
+    unanswered = {"bing": [], "duckduckgo": []}
     browser_tallies = []
     interrupted = False
     # An engine that is searched through the browser is not also asked with plain requests
@@ -170,7 +173,7 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
             archive_entries, archive_remark = sources.search_archive(
                 Fetcher(user_agent or PROGRAM_USER_AGENT), domain, file_types, log=log
             )
-            done.add("archive")
+            archive_asked = True
 
         # One session per search engine, so that the cookies it sets are sent back as a browser would
         bing = Fetcher(user_agent or DEFAULT_USER_AGENT)
@@ -194,16 +197,18 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
             first = False
 
             if ask_bing:
-                for link in sources.search_bing(bing, domain, file_type, max_pages, delay, log):
+                result, gap = sources.search_bing(bing, domain, file_type, max_pages, delay, log)
+                for link in result:
                     from_bing.add(keep(link))
+                unanswered["bing"].append(gap)
             if ask_duckduckgo:
                 # DuckDuckGo is left alone for the rest of the run once it has refused to answer
-                result, duckduckgo_blocked = sources.search_duckduckgo(duckduckgo, domain, file_type, max_pages, delay, log)
+                result, duckduckgo_blocked, gap = sources.search_duckduckgo(duckduckgo, domain, file_type, max_pages, delay, log)
                 for link in result:
                     from_duckduckgo.add(keep(link))
+                unanswered["duckduckgo"].append(gap)
                 if duckduckgo_blocked:
                     left_out.add("duckduckgo")
-        done.update(engines)
 
         if browser_engines:
             from . import browser
@@ -223,15 +228,19 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
     # The Archive's files are added last, so that for a file both know the search engine's current
     # address is the one kept. Either way the Archive's copy is remembered for it.
     for entry in archive_entries:
-        archive_copies.setdefault(keep(entry.link), entry.archive_copy)
+        kept = keep(entry.link)
+        from_archive.add(kept)
+        archive_copies.setdefault(kept, entry.archive_copy)
 
-    # A source that was not asked to the end (left out, or cut short by Ctrl+C) is marked as such
+    # Every source is counted by the different files it gave. A source that was not asked to the end
+    # (left out, or cut short by Ctrl+C) is marked as such, and so is one that left requests unanswered.
     tallies = []
     if "archive" in http_sources:
-        tallies.append(sources.tally_row(SOURCE_NAMES["archive"], len(archive_entries), "archive" not in done, archive_remark))
+        tallies.append(sources.tally_row(SOURCE_NAMES["archive"], len(from_archive), not archive_asked, archive_remark))
     for name, links_found in (("bing", from_bing), ("duckduckgo", from_duckduckgo)):
         if name in asked:
-            tallies.append(sources.tally_row(SOURCE_NAMES[name], len(links_found), name in left_out or name not in done))
+            stopped = name in left_out or len(unanswered[name]) < len(file_types)
+            tallies.append(sources.tally_row(SOURCE_NAMES[name], len(links_found), stopped, unanswered=unanswered[name]))
     if browser_engines and not browser_tallies:
         # The search was cut short before the browser search had begun
         browser_tallies = [sources.tally_row(SOURCE_NAMES[name] + " (browser)", 0, True) for name in browser_engines]
@@ -240,66 +249,72 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
 
 
 def download_files(file_links, output_dir, user_agent=None, archive_copies=None, file_types=None):
-    """Download every link into output_dir. Returns (downloaded, failed).
+    """Download every link into output_dir. Returns (downloaded, failed, interrupted).
 
     file_types are the wanted file types: every saved file gets a name that ends in one of them.
+    interrupted is True if Ctrl+C ended the downloads early; the files saved by then are whole and are kept.
     """
     file_links = [link.strip() for link in file_links if link and link.strip()]
     file_types = file_types or links.DEFAULT_FILE_TYPES
     if not file_links:
         log("[-] There are no files to download.")
-        return 0, 0
+        return 0, 0, False
 
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir, exist_ok=True)
     log("[*] Downloading %s to %s" % (counted(len(file_links)), os.path.abspath(output_dir)))
 
     downloaded = failed = 0
-    for link in file_links:
-        # When downloading files if a file has the same name a number is added to it
-        name = links.safe_file_name(link, file_types)
-        candidate, number = name, 1
-        while os.path.exists(os.path.join(output_dir, candidate)):
-            base, extension = os.path.splitext(name)
-            candidate = "%s-%d%s" % (base, number, extension)
-            number += 1
-        destination = os.path.join(output_dir, candidate)
+    interrupted = False
+    try:
+        for link in file_links:
+            # When downloading files if a file has the same name a number is added to it
+            name = links.safe_file_name(link, file_types)
+            candidate, number = name, 1
+            while os.path.exists(os.path.join(output_dir, candidate)):
+                base, extension = os.path.splitext(name)
+                candidate = "%s-%d%s" % (base, number, extension)
+                number += 1
+            destination = os.path.join(output_dir, candidate)
 
-        log("[*] Now Downloading %s" % link)
-        problem = None
-        try:
+            log("[*] Now Downloading %s" % link)
+            problem = None
             try:
-                # Target servers often have expired or self-signed certificates, so certificate errors are
-                # ignored for them - and only for them
-                download(link, destination, user_agent or DEFAULT_USER_AGENT, verify_certificate=False)
-            except FetchError as error:
-                problem = str(error)
-
-            # A file that is gone from the site may still be in the Internet Archive
-            if problem and archive_copies and link in archive_copies:
-                log("[*] Not available from the site (%s). Trying the copy in the Internet Archive." % problem)
-                time.sleep(1)
                 try:
-                    download(archive_copies[link], destination, user_agent or PROGRAM_USER_AGENT, verify_certificate=True)
-                    problem = None
+                    # Target servers often have expired or self-signed certificates, so certificate errors are
+                    # ignored for them - and only for them
+                    download(link, destination, user_agent or DEFAULT_USER_AGENT, verify_certificate=False)
                 except FetchError as error:
                     problem = str(error)
-        except SaveError as error:
-            # This computer cannot store the file (disk full, folder not writable). The next file would
-            # fare no better, and neither the site nor the Internet Archive has anything to do with it.
-            left = len(file_links) - downloaded - failed
-            log("[!] %s. The downloads stop here: %s not downloaded." % (error, counted(left, verb=True)))
-            failed += left
-            break
 
-        if problem:
-            log("[!] Could not download %s : %s" % (link, problem))
-            failed += 1
-        else:
-            downloaded += 1
+                # A file that is gone from the site may still be in the Internet Archive
+                if problem and archive_copies and link in archive_copies:
+                    log("[*] Not available from the site (%s). Trying the copy in the Internet Archive." % problem)
+                    time.sleep(1)
+                    try:
+                        download(archive_copies[link], destination, user_agent or PROGRAM_USER_AGENT, verify_certificate=True)
+                        problem = None
+                    except FetchError as error:
+                        problem = str(error)
+            except SaveError as error:
+                # This computer cannot store the file (disk full, folder not writable). The next file would
+                # fare no better, and neither the site nor the Internet Archive has anything to do with it.
+                left = len(file_links) - downloaded - failed
+                log("[!] %s. The downloads stop here: %s not downloaded." % (error, counted(left, verb=True)))
+                failed += left
+                break
 
+            if problem:
+                log("[!] Could not download %s : %s" % (link, problem))
+                failed += 1
+            else:
+                downloaded += 1
+    except KeyboardInterrupt:
+        interrupted = True
+        log()
+        log("[!] Interrupted: the downloads stop here. What was downloaded so far is kept.")
     log("%s Downloaded %s to %s (%d failed)." % ("[+]" if downloaded else "[-]", counted(downloaded), os.path.abspath(output_dir), failed))
-    return downloaded, failed
+    return downloaded, failed, interrupted
 
 
 def extract_metadata(folder, csv_path=None):
@@ -452,6 +467,7 @@ def main(argv=None):
     try:
         return _run(argv)
     except KeyboardInterrupt:
+        # Ctrl+C before there is anything to sum up (or once more while the summary is being printed)
         log()
         log("[!] Interrupted.")
         return 130
@@ -558,46 +574,71 @@ def _run(argv):
                     log("    " + link)
             return finish(130)
 
+    # What follows the search can be cut short with Ctrl+C as well. The run still ends with the summary.
+    try:
+        status = _download_and_extract(args, file_links, archive_copies, file_types, listed, summary)
+    except KeyboardInterrupt:
+        log()
+        log("[!] Interrupted.")
+        status = 130
+    return finish(status)
+
+
+def _download_and_extract(args, file_links, archive_copies, file_types, listed, summary):
+    """What a run does with the links it has: download the files, then read their metadata, each after
+    asking unless the options say so. Adds a row to summary for each step that was taken and returns
+    the exit code. listed is False if the links exist nowhere but in this run."""
     if not file_links:
         log("[-] Nothing to download.")
-        return finish(0)
+        return 0
 
     # If no output directory was named, use one named after the current date and time
     output_dir = args.output_dir or datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
 
-    status = 0
     if args.download or ask_yes_no("Would you like to download all of the files discovered?"):
         try:
-            downloaded, failed = download_files(file_links, output_dir, args.user_agent or None, archive_copies, file_types)
+            downloaded, failed, interrupted = download_files(file_links, output_dir, args.user_agent or None, archive_copies, file_types)
         except OSError as error:
             log("[!] The output directory %s cannot be used: %s" % (output_dir, error))
             if not listed:
                 log("[*] The links that were found (use --list-out FILE to have them written to a file):")
                 for link in file_links:
                     log("    " + link)
-            return finish(1)
-        summary.append(("Files downloaded", "%d (%d failed)" % (downloaded, failed) if failed else downloaded))
+            summary.append(("Files downloaded", "0 (the output directory could not be used)"))
+            return 1
+        if interrupted:
+            value = "%d of %d (%sinterrupted)" % (downloaded, len(file_links), "%d failed, " % failed if failed else "")
+        else:
+            value = "%d (%d failed)" % (downloaded, failed) if failed else downloaded
+        summary.append(("Files downloaded", value))
+        if downloaded:
+            summary.append(("Saved to", os.path.abspath(output_dir)))
+        if interrupted:
+            return 130
         if downloaded == 0:
             # Every download failed: there is nothing to extract metadata from
-            return finish(1 if failed else 0)
-        summary.append(("Saved to", os.path.abspath(output_dir)))
+            return 1 if failed else 0
     else:
         log("[*] No files will be downloaded.")
 
     # Without a folder of files there is nothing to extract metadata from
     if not os.path.isdir(output_dir):
-        return finish(status)
+        return 0
 
     if args.extract or ask_yes_no("Would you like to extract metadata from all of the files downloaded now?"):
-        worked, extracted = extract_metadata(output_dir, args.csv or None)
+        try:
+            worked, extracted = extract_metadata(output_dir, args.csv or None)
+        except KeyboardInterrupt:
+            summary.append(("Metadata", "interrupted"))
+            raise
         if not worked:
-            status = 1
-        elif extracted:
+            summary.append(("Metadata", "could not be extracted"))
+            return 1
+        if extracted:
             summary.append(("Metadata", extracted))
     else:
         log(
             "[*] No metadata will be extracted at this time. To extract it later run: "
             'python -m justosint --extract-dir "%s"' % output_dir
         )
-
-    return finish(status)
+    return 0

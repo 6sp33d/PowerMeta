@@ -97,10 +97,18 @@ The start and the end of a run look like this:
 
 Lines are marked `[*]` for what is being done, `[+]` for something found, `[-]` for nothing found, `[!]` for a problem and `[?]` for a question.
 
-Every run ends with this summary, made to fit in one screenshot, also a run that finds nothing, downloads nothing, or is stopped with Ctrl+C during the search:
+Every run that searches, or reads a list of links, ends with this summary, made to fit in one screenshot. That includes a run that finds nothing or downloads nothing and, in the Python version, a run that is stopped with Ctrl+C.
 
-- **Files by type** lists every file type that was asked for, with the number of files found. A file counts as the type it is saved as.
-- **Files by source** says how many files each source gave. Two sources often know the same file, so these numbers can add up to more than the total; the summary says so when they do. A source that did not get through carries a remark: `left out` (it was not used, for example Bing when it does not keep to the site), `stopped early` (it gave some files and then refused, or the search was cut short), `did not answer`, or `incomplete` (the Internet Archive holds more addresses than were read).
+- The rows at the top say what was done. A step that was asked for and did not work is named as well, for example `Metadata : could not be extracted`.
+- **Files by type** lists every file type that was asked for, with the number of files found. A file counts as the type it is saved as. With `--list-in` (`-TargetFileList`), links that would not be saved as one of these types are counted in a last row, `other`.
+- **Files by source** says how many different files each source gave. Two sources often know the same file, so these numbers can add up to more than the total; the summary says so when they do. A source that did not get through carries a remark:
+
+| Remark | What it says about the source |
+|---|---|
+| `left out` | Nothing came of it. It was not used (in the Python version: Bing when it does not keep to the site), it refused at the start and was skipped, or the search was cut short before it gave a file. |
+| `stopped early` | It gave some files and then refused, or the search was cut short. |
+| `did not answer` | It was asked, and none of its searches got an answer. |
+| `incomplete` | Its number may be too low: the Internet Archive holds more addresses than were read, a search engine left a request unanswered, or the address behind some Google results was not read. |
 
 ## Where the files are found
 
@@ -195,7 +203,7 @@ justOSINT looks for ExifTool next to `justOSINT.ps1` and on the PATH. It does no
 Good to know:
 
 - Unless `--user-agent` says otherwise, the Internet Archive is told that the requests come from justOSINT (`justOSINT/1.0.0`); the search engines and the target site are sent a browser-like User-Agent, as in the PowerShell version.
-- Ctrl+C during the search stops the run but keeps what was found: the links are written to the `--list-out` file, or printed if there is none, and can be downloaded later with `--list-in`.
+- Ctrl+C during the search stops the run but keeps what was found: the links are written to the `--list-out` file, or printed if there is none, and can be downloaded later with `--list-in`. Ctrl+C during the downloads keeps the files that were saved by then. Either way the run still ends with the summary.
 - Without a terminal (for example in a scheduled job) nothing can be asked: use `--download` and `--extract`, and a question of the browser search is answered in the way that lets the run carry on.
 - The exit code is 0 when the run finished (also when it found nothing, or when a search engine or the browser could not be used); 1 when the input was not usable, the output folder or link list could not be written, nothing could be downloaded, or the metadata could not be extracted; 2 for a wrong option; 130 after Ctrl+C.
 
@@ -219,7 +227,7 @@ PS C:\> Invoke-JustOSINT -TargetDomain targetdomain.com -MaxSearchPages 2 -Extra
 PS C:\> ExtractMetadata -OutputDir .\2026-11-18-144953\ -ExtractAllToCsv all-target-metadata.csv
 ```
 
-The PowerShell version asks the Internet Archive, Bing and DuckDuckGo with plain web requests. It does not search Google and has no browser search. `Invoke-JustOSINT` ends with the same summary as the Python version.
+The PowerShell version asks the Internet Archive, Bing and DuckDuckGo with plain web requests. It does not search Google and has no browser search. `Invoke-JustOSINT` ends with the same summary as the Python version, except when it is stopped with Ctrl+C: PowerShell then ends the function at once and prints nothing more.
 
 ```
 TargetDomain        - The target domain to search for files.

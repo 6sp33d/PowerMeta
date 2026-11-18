@@ -155,7 +155,9 @@ class Session:
         self.lookup = lookup  # how the address of a result that hides it is read: see LOOKUPS
         self.user_agent = user_agent or web.PROGRAM_USER_AGENT  # for lookups with plain requests
         self.found = []  # every link found in this window, in the order found
-        self.per_engine = {}  # {search engine: the links it gave}
+        self.per_engine = {}  # {search engine: the different files it gave, by the key of their link}
+        # {search engine: for each of its searches that has ended, what of it was left unread}
+        self.unanswered = {}
         self.skipped = set()  # search engines that are left alone for the rest of the run
         self.gone = False  # the window was closed, or the browser can no longer be reached
         self.lookups_off = lookup == "off"  # results that hide their address are left out
@@ -261,7 +263,8 @@ class Session:
 
     def keep(self, link, engine=None):
         """Remember a link that was found, and hand it to whoever asked to be told at once."""
-        self.per_engine.setdefault(engine, set()).add(link)
+        # A file counts once for a search engine, also when it is listed under "http://" and "https://"
+        self.per_engine.setdefault(engine, set()).add(links.link_key(link))
         if link not in self.found:
             self.found.append(link)
             if self.on_link is not None:
@@ -855,6 +858,15 @@ class Session:
         self._go(results_url)
 
 
+def _not_shown(session, engine, page_number):
+    """What a search is missing when one of its result pages could not be shown: "all" of it for the
+    first page, "part" of it for a later one. Nothing for a search engine that was skipped, or when the
+    window is gone: such an engine is marked as stopped anyway."""
+    if session.gone or engine in session.skipped:
+        return ""
+    return "all" if page_number == 1 else "part"
+
+
 def _keep(session, engine, candidates, domain, file_type, found):
     """Add the wanted files among the candidates to found. Returns (new files, links on the domain)."""
     new, on_domain = 0, 0
@@ -879,6 +891,7 @@ def search_google(session, domain, file_type, max_pages=5, delay=2):
     query = "site:%s filetype:%s" % (domain, file_type)
     own_hosts = (_host(GOOGLE_URL),)
     unread = 0
+    gap = ""  # what of this search could not be read: see Session.unanswered
 
     def read():
         addresses, hidden = [], []
@@ -901,12 +914,14 @@ def search_google(session, domain, file_type, max_pages=5, delay=2):
         log("[*] Now Analyzing page %d of Google search results" % page_number)
         url = GOOGLE_URL + "?" + urllib.parse.urlencode({"q": query, "start": (page_number - 1) * 10, "filter": "0"})
         if not session.show("google", url):
+            gap = _not_shown(session, "google", page_number)
             break
 
         addresses, hidden = read()
         if not addresses and not hidden:
             if not has_search_box(session.source()):
                 if not session.clear_check("google", url, in_the_way):
+                    gap = _not_shown(session, "google", page_number)
                     break
                 addresses, hidden = read()
             elif page_number == 1 and session.second_look("google", url):
@@ -937,6 +952,7 @@ def search_google(session, domain, file_type, max_pages=5, delay=2):
                 # The results had to be opened again, and may now carry new links for the same results
                 session.results_reloaded = False
                 if not session.clear_check("google", url):
+                    unread += len(hidden) - position
                     break
                 again = read()[1]
                 if len(again) == len(hidden):
@@ -950,6 +966,8 @@ def search_google(session, domain, file_type, max_pages=5, delay=2):
 
     if unread:
         log("[!] The address behind %d Google results was not read." % unread)
+        gap = gap or "part"
+    session.unanswered.setdefault("google", []).append(gap)
     log(sources.tally("Google (browser)", len(found), "%s files" % file_type))
     return found
 
@@ -990,6 +1008,7 @@ def search_bing(session, domain, file_type, max_pages=5, delay=2):
     found = []
     query = "site:%s filetype:%s" % (domain, file_type)
     first, results_seen, on_domain_seen = 1, 0, 0
+    gap = ""
 
     log("[*] Searching Bing for '%s' in the browser" % query)
     for page_number in range(1, max_pages + 1):
@@ -998,6 +1017,7 @@ def search_bing(session, domain, file_type, max_pages=5, delay=2):
         log("[*] Now Analyzing page %d of Bing search results" % page_number)
         url = BING_URL + "?" + urllib.parse.urlencode({"q": query, "first": first})
         if not session.show("bing", url):
+            gap = _not_shown(session, "bing", page_number)
             break
         results = links.count_bing_results(session.source())
         new, on_domain = _keep(session, "bing", [links.unwrap_bing(href) for href in session.hrefs()], domain, file_type, found)
@@ -1009,6 +1029,7 @@ def search_bing(session, domain, file_type, max_pages=5, delay=2):
 
     if results_seen > 0 and on_domain_seen == 0:
         log(sources.BING_NO_FILES % (query, file_type))
+    session.unanswered.setdefault("bing", []).append(gap)
     log(sources.tally("Bing (browser)", len(found), "%s files" % file_type))
     return found
 
@@ -1019,10 +1040,13 @@ def search_duckduckgo(session, domain, file_type, max_pages=5, delay=2):
     found = []
     query = "site:%s filetype:%s" % (domain, file_type)
     offset = 0
+    gap = ""
 
     log("[*] Searching DuckDuckGo for '%s' in the browser" % query)
     url = DUCKDUCKGO_URL + "?" + urllib.parse.urlencode({"q": query})
-    if session.show("duckduckgo", url):
+    if not session.show("duckduckgo", url):
+        gap = _not_shown(session, "duckduckgo", 1)
+    else:
         if links.count_duckduckgo_results(session.source()) == 0:
             session.second_look("duckduckgo", url)
         for page_number in range(1, max_pages + 1):
@@ -1042,12 +1066,14 @@ def search_duckduckgo(session, domain, file_type, max_pages=5, delay=2):
             if not session.press_form(next_form["s"]):
                 if not session.gone:
                     log("[!] The next page of DuckDuckGo's results could not be opened. The results so far are kept.")
+                    gap = "part"
                 break
             offset = int(next_form["s"])
             # A check can also come up on a later page
             if not session.clear_check("duckduckgo"):
                 break
 
+    session.unanswered.setdefault("duckduckgo", []).append(gap)
     log(sources.tally("DuckDuckGo (browser)", len(found), "%s files" % file_type))
     return found
 
@@ -1063,11 +1089,12 @@ def search(engines, domain, file_types, max_pages=5, delay=2, browser_name="chro
     found when the search ends early. Ctrl+C is passed on to the caller, after the browser has been closed.
     lookup says how the address of a Google result that hides it is read: "click" (the result is clicked
     in the window), "request" (Google's link is asked with a plain web request first) or "off".
-    tallies, if given, is a list that gets one (name, number of files, remark) entry per search engine.
+    tallies, if given, is a list that gets one (name, number of files, remark) entry per search engine:
+    see sources.tally_row for the remarks.
     """
-    def tally(engine, count, stopped):
+    def tally(engine, count, stopped, unanswered=()):
         if tallies is not None:
-            tallies.append(sources.tally_row(NAMES[engine] + " (browser)", count, stopped))
+            tallies.append(sources.tally_row(NAMES[engine] + " (browser)", count, stopped, unanswered=unanswered))
 
     try:
         session = Session(
@@ -1107,6 +1134,6 @@ def search(engines, domain, file_types, max_pages=5, delay=2, browser_name="chro
         log("[!] The browser search stopped early (%s). What it had found is kept." % _first_line(error))
     finally:
         for engine in engines:
-            tally(engine, len(session.per_engine.get(engine, ())), engine not in through)
+            tally(engine, len(session.per_engine.get(engine, ())), engine not in through, session.unanswered.get(engine, ()))
         session.close()
     return session.found
