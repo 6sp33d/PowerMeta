@@ -334,6 +334,14 @@ def safe_file_name(link, file_types=DEFAULT_FILE_TYPES):
     return name
 
 
+def file_type_of(link, file_types=DEFAULT_FILE_TYPES):
+    """The wanted file type a link counts as: the ending its file is saved with (see safe_file_name).
+    None if that is not one of the wanted types, which only a link from a list of links can be."""
+    name = safe_file_name(link, file_types)
+    ending = name.rsplit(".", 1)[1].lower() if "." in name else ""
+    return ending if ending in file_types else None
+
+
 def count_bing_results(page):
     """Each organic Bing result sits in an element with class "b_algo"."""
     return len(re.findall(r'class="b_algo[ "]', page or ""))

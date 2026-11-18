@@ -29,12 +29,13 @@ def tally(source, count, what="files"):
     return "[-] %s: no %s found" % (source, what)
 
 
-def tally_value(count, stopped=False):
-    """What a source gave, for the table at the end of the search: a number, or a remark when the source
-    was left out or stopped before it was through."""
-    if not stopped:
-        return count
-    return "%d (stopped early)" % count if count else "left out"
+def tally_row(source, count, stopped=False, remark=""):
+    """What a source gave, for the summary of a run: (name, number of files, remark). The remark is empty
+    unless the source did not get through. For a source that was stopped it says "stopped early", or
+    "left out" if nothing had come of it by then."""
+    if stopped and not remark:
+        remark = "stopped early" if count else "left out"
+    return (source, count, remark)
 
 
 def _collect(page_links, unwrap, domain, file_type, found):
@@ -59,7 +60,8 @@ def search_archive(fetcher, domain, file_types, max_results=10000, log=print):
     and its sub-domains that name a wanted file type (at most max_results of them).
 
     The index is a service made to be queried by programs, and one request covers all file types.
-    Files it lists may have been removed from the site since. Returns a list of links.ArchiveEntry.
+    Files it lists may have been removed from the site since. Returns (a list of links.ArchiveEntry,
+    remark): the remark is empty, "did not answer", or "incomplete" when the index holds more than was read.
     """
     log("[*] Asking the Internet Archive which files it has seen on %s" % domain)
     query = [
@@ -76,7 +78,7 @@ def search_archive(fetcher, domain, file_types, max_results=10000, log=print):
         page = fetcher.get(ARCHIVE_INDEX_URL + "?" + urllib.parse.urlencode(query), timeout=180)
     except FetchError as error:
         log("[!] The Internet Archive did not answer (%s). Its index is sometimes slow or busy; try again later." % error)
-        return []
+        return [], "did not answer"
 
     entries = links.parse_archive_index(page.text, domain, file_types)
     log(tally("Internet Archive", len(entries)))
@@ -87,7 +89,8 @@ def search_archive(fetcher, domain, file_types, max_results=10000, log=print):
             "[!] The Internet Archive has more than %d matching addresses for %s. Only the first %d were read, "
             "so this list is incomplete." % (max_results, domain, max_results)
         )
-    return entries
+        return entries, "incomplete"
+    return entries, ""
 
 
 # What is said about Bing's answers. Each is two short lines rather than one long one.

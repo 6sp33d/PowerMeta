@@ -55,6 +55,75 @@ function Get-JustOSINTTally {
     return ('[-] ' + $Source + ': no ' + $What + ' found')
 }
 
+#The lines of a small table: one per name, with the values in a column of their own. With -Numbers the
+#values stand against the right edge of their column, as in a table of counts, and a row's remark, if it
+#has one, follows in parentheses.
+function Get-JustOSINTTable {
+    param(
+        [string[]]$Names = @(),
+        [string[]]$Values = @(),
+        [string[]]$Remarks = @(),
+        [string]$Indent = '    ',
+        [switch]$Numbers
+    )
+
+    $nameWidth = 0
+    foreach ($name in $Names) { if ($name.Length -gt $nameWidth) { $nameWidth = $name.Length } }
+    $valueWidth = 0
+    foreach ($value in $Values) { if ($value.Length -gt $valueWidth) { $valueWidth = $value.Length } }
+
+    for ($i = 0; $i -lt $Names.Count; $i++)
+        {
+        if ($Numbers)
+            {
+            $line = $Indent + $Names[$i].PadRight($nameWidth) + '  ' + $Values[$i].PadLeft($valueWidth)
+            if ($i -lt $Remarks.Count -and $Remarks[$i] -ne '') { $line = $line + '  (' + $Remarks[$i] + ')' }
+            }
+        else
+            {
+            $line = $Indent + $Names[$i].PadRight($nameWidth) + ' : ' + $Values[$i]
+            }
+        Write-Output $line
+        }
+}
+
+#The closing summary of a run, made to fit in one screenshot: a few "name : value" rows, then how many
+#files there are of each type, then how many each source gave. Files is the number of different files.
+function Write-JustOSINTSummary {
+    param(
+        [string]$Subject,
+        [string[]]$Names = @(),
+        [string[]]$Values = @(),
+        [string[]]$TypeNames = @(),
+        [string[]]$TypeCounts = @(),
+        [string[]]$SourceNames = @(),
+        [string[]]$SourceCounts = @(),
+        [string[]]$SourceRemarks = @(),
+        [int]$Files = 0
+    )
+
+    Write-Output ''
+    Write-Output ('[*] Summary for ' + $Subject)
+    Get-JustOSINTTable -Names $Names -Values $Values
+    if ($TypeNames.Count -gt 0)
+        {
+        Write-Output ''
+        Write-Output '    Files by type'
+        Get-JustOSINTTable -Names $TypeNames -Values $TypeCounts -Indent '        ' -Numbers
+        }
+    if ($SourceNames.Count -gt 0)
+        {
+        Write-Output ''
+        Write-Output '    Files by source'
+        Get-JustOSINTTable -Names $SourceNames -Values $SourceCounts -Remarks $SourceRemarks -Indent '        ' -Numbers
+
+        #Two sources often know the same file, so their numbers can add up to more than there are files
+        $sum = 0
+        foreach ($count in $SourceCounts) { $sum = $sum + [int]$count }
+        if ($sum -gt $Files) { Write-Output '        (a file that several sources gave is counted for each of them)' }
+        }
+}
+
 Function Invoke-JustOSINT{
 
     <#
@@ -207,6 +276,14 @@ Function Invoke-JustOSINT{
 
     $targetlinks = @()
 
+    #What the summary at the end of the run is made from: its "name : value" rows, and what each source gave
+    $summarySubject = ''
+    $summaryNames = New-Object System.Collections.Generic.List[string]
+    $summaryValues = New-Object System.Collections.Generic.List[string]
+    $sourceRowNames = New-Object System.Collections.Generic.List[string]
+    $sourceRowCounts = New-Object System.Collections.Generic.List[string]
+    $sourceRowRemarks = New-Object System.Collections.Generic.List[string]
+
     #For links found through the Internet Archive: where the Archive keeps its copy of the file.
     #A plain .NET Hashtable, because its keys are case-sensitive (links can differ only in letter case).
     $archiveCopies = New-Object System.Collections.Hashtable
@@ -243,10 +320,15 @@ Function Invoke-JustOSINT{
 
             #The Internet Archive answers for all file types in a single request
             $archiveEntries = @()
+            $archiveRemark = ''
             if ($SearchEngines -contains 'Archive')
                 {
-                $archiveEntries = @(Search-JustOSINTArchive -Domain $domain -FileTypes $filetypearray -UserAgent $UserAgent)
+                $archiveEntries = @(Search-JustOSINTArchive -Domain $domain -FileTypes $filetypearray -UserAgent $UserAgent -Remark ([ref]$archiveRemark))
                 }
+
+            #The different files each search engine gave, by the key of their link
+            $bingKeys = New-Object System.Collections.Hashtable
+            $duckDuckGoKeys = New-Object System.Collections.Hashtable
 
             #The search engines are asked once per file type. DuckDuckGo is left alone for the rest of the
             #run once it has refused to answer.
@@ -266,12 +348,16 @@ Function Invoke-JustOSINT{
 
                 if ($askBing)
                     {
-                    $found += @(Search-JustOSINTBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay)
+                    $fromBing = @(Search-JustOSINTBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay)
+                    foreach ($link in $fromBing) { $bingKeys[[string](Get-JustOSINTLinkKey $link)] = $true }
+                    $found += $fromBing
                     }
 
                 if ($askDuckDuckGo)
                     {
-                    $found += @(Search-JustOSINTDuckDuckGo -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay -Blocked ([ref]$duckDuckGoBlocked))
+                    $fromDuckDuckGo = @(Search-JustOSINTDuckDuckGo -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay -Blocked ([ref]$duckDuckGoBlocked))
+                    foreach ($link in $fromDuckDuckGo) { $duckDuckGoKeys[[string](Get-JustOSINTLinkKey $link)] = $true }
+                    $found += $fromDuckDuckGo
                     }
 
                 foreach ($link in $found)
@@ -307,11 +393,42 @@ Function Invoke-JustOSINT{
             Write-Output ($marker + ' A total of ' + (Get-JustOSINTCount -Count $targetlinks.Count -Verb) + " discovered on $domain.")
             Write-Output ''
 
+            $summarySubject = $domain
+            $summaryNames.Add('Files found')
+            $summaryValues.Add([string]($targetlinks.Count))
+
+            #What each source gave, for the summary. A source that did not get through gets a remark.
+            if ($SearchEngines -contains 'Archive')
+                {
+                $sourceRowNames.Add('Internet Archive')
+                $sourceRowCounts.Add([string]($archiveEntries.Count))
+                $sourceRowRemarks.Add([string]$archiveRemark)
+                }
+            if ($SearchEngines -contains 'Bing')
+                {
+                $sourceRowNames.Add('Bing')
+                $sourceRowCounts.Add([string]($bingKeys.Count))
+                $sourceRowRemarks.Add('')
+                }
+            if ($SearchEngines -contains 'DuckDuckGo')
+                {
+                $remark = ''
+                if ($duckDuckGoBlocked)
+                    {
+                    if ($duckDuckGoKeys.Count -gt 0) { $remark = 'stopped early' } else { $remark = 'left out' }
+                    }
+                $sourceRowNames.Add('DuckDuckGo')
+                $sourceRowCounts.Add([string]($duckDuckGoKeys.Count))
+                $sourceRowRemarks.Add($remark)
+                }
+
             #If an OutputList is specified write the results to disk
             If ($OutputList -ne "" -and $targetlinks.Count -gt 0)
                 {
                 $targetlinks | Out-File -LiteralPath $OutputList -Encoding ascii
                 Write-Output "[+] The links were written to $OutputList"
+                $summaryNames.Add('Link list')
+                $summaryValues.Add($OutputList)
                 }
 
         }
@@ -330,11 +447,53 @@ Function Invoke-JustOSINT{
         $marker = '[+]'
         if ($targetlinks.Count -eq 0) { $marker = '[-]' }
         Write-Output ($marker + ' A total of ' + (Get-JustOSINTCount -Count $targetlinks.Count -Verb) + ' found in the list.')
+
+        $summarySubject = $TargetFileList
+        $summaryNames.Add('Links in the list')
+        $summaryValues.Add([string]($targetlinks.Count))
         }
+
+    #How many of the files there are of each wanted type. A file counts as the type it is saved as;
+    #a link of no wanted type (a list of links can hold them) counts as "other".
+    $summaryTypes = $filetypearray
+    if ($summaryTypes.Count -eq 0) { $summaryTypes = @('pdf', 'docx', 'xlsx', 'doc', 'xls', 'pptx', 'ppt') }
+    $typeTotals = New-Object System.Collections.Hashtable
+    foreach ($type in $summaryTypes) { $typeTotals[$type] = 0 }
+    $otherTypes = 0
+    foreach ($link in $targetlinks)
+        {
+        $savedName = [string](Get-JustOSINTFileName -Link $link -FileTypes $summaryTypes)
+        $ending = ''
+        $dot = $savedName.LastIndexOf('.')
+        if ($dot -ge 0) { $ending = $savedName.Substring($dot + 1).ToLowerInvariant() }
+        if ($typeTotals.ContainsKey($ending)) { $typeTotals[$ending] = [int]$typeTotals[$ending] + 1 } else { $otherTypes++ }
+        }
+    $typeNames = New-Object System.Collections.Generic.List[string]
+    $typeCounts = New-Object System.Collections.Generic.List[string]
+    foreach ($type in $summaryTypes)
+        {
+        $typeNames.Add($type)
+        $typeCounts.Add([string]($typeTotals[$type]))
+        }
+    if ($otherTypes -gt 0)
+        {
+        $typeNames.Add('other')
+        $typeCounts.Add([string]$otherTypes)
+        }
+
+    #Every run that searched, or read a list of links, ends with the summary
+    $writeSummary = {
+        Write-JustOSINTSummary -Subject $summarySubject -Names $summaryNames.ToArray() -Values $summaryValues.ToArray() -TypeNames $typeNames.ToArray() -TypeCounts $typeCounts.ToArray() -SourceNames $sourceRowNames.ToArray() -SourceCounts $sourceRowCounts.ToArray() -SourceRemarks $sourceRowRemarks.ToArray() -Files $targetlinks.Count
+    }
+
+    #Set by Get-TargetFiles and ExtractMetadata: what they did, for the summary
+    $downloadResult = $null
+    $metadataSummary = ''
 
     if ($targetlinks.Count -eq 0)
         {
         Write-Output "[-] Nothing to download."
+        & $writeSummary
         return
         }
 
@@ -346,7 +505,7 @@ Function Invoke-JustOSINT{
 
     If ($Download)
     {
-        Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent -ArchiveCopies $archiveCopies -FileTypes $filetypearray
+        Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent -ArchiveCopies $archiveCopies -FileTypes $filetypearray -Result ([ref]$downloadResult)
     }
     else
         {
@@ -364,23 +523,37 @@ Function Invoke-JustOSINT{
                 {
                  0 {
                     "[*] Now downloading the files."
-                    Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent -ArchiveCopies $archiveCopies -FileTypes $filetypearray
+                    Get-TargetFiles -targetlinks $targetlinks -OutputDir $OutputDir -UserAgent $UserAgent -ArchiveCopies $archiveCopies -FileTypes $filetypearray -Result ([ref]$downloadResult)
                    }
                  1 {"[*] No files will be downloaded."}
                 }
 
         }
 
+    if ($null -ne $downloadResult)
+        {
+        $value = [string]($downloadResult['Downloaded'])
+        if ([int]$downloadResult['Failed'] -gt 0) { $value = $value + ' (' + $downloadResult['Failed'] + ' failed)' }
+        $summaryNames.Add('Files downloaded')
+        $summaryValues.Add($value)
+        if ([int]$downloadResult['Downloaded'] -gt 0)
+            {
+            $summaryNames.Add('Saved to')
+            $summaryValues.Add([string]($downloadResult['Path']))
+            }
+        }
+
     # Without a folder of files there is nothing to extract metadata from.
     if (-not (Test-Path -LiteralPath $OutputDir -PathType Container))
         {
+        & $writeSummary
         return
         }
 
     If ($Extract)
         {
             Write-Output "[*] Now extracting metadata from the files."
-            ExtractMetadata -OutputDir $OutputDir -ExtractAllToCsv $ExtractAllToCsv
+            ExtractMetadata -OutputDir $OutputDir -ExtractAllToCsv $ExtractAllToCsv -Summary ([ref]$metadataSummary)
         }
     else
         {
@@ -398,11 +571,18 @@ Function Invoke-JustOSINT{
                 {
                  0 {
                     Write-Output "[*] Now extracting metadata from the files."
-                    ExtractMetadata -OutputDir $OutputDir -ExtractAllToCsv $ExtractAllToCsv
+                    ExtractMetadata -OutputDir $OutputDir -ExtractAllToCsv $ExtractAllToCsv -Summary ([ref]$metadataSummary)
                    }
                  1 {"[*] No metadata will be extracted at this time. If you wish to extract metadata later you can run the ExtractMetadata function on a directory of files like so: PS C:>ExtractMetadata -OutputDir `"C:\Users\username\directory-of-files\`""}
                 }
         }
+
+    if ($metadataSummary -ne '')
+        {
+        $summaryNames.Add('Metadata')
+        $summaryValues.Add([string]$metadataSummary)
+        }
+    & $writeSummary
 }
 
 #Splits "pdf, docx,xlsx" into clean lower-case extensions
@@ -826,7 +1006,8 @@ function Search-JustOSINTArchive {
         [string]$Domain,
         [string[]]$FileTypes,
         [string]$UserAgent = "",
-        [int]$MaxResults = 10000
+        [int]$MaxResults = 10000,
+        [ref]$Remark
     )
 
     Write-Host "[*] Asking the Internet Archive which files it has seen on $Domain"
@@ -844,6 +1025,7 @@ function Search-JustOSINTArchive {
     if ($null -eq $text)
         {
         Write-Host "[!] The Internet Archive did not answer. Its index is sometimes slow or busy; try again later."
+        if ($null -ne $Remark) { $Remark.Value = 'did not answer' }
         return
         }
 
@@ -855,6 +1037,7 @@ function Search-JustOSINTArchive {
     if ($lineCount -ge $MaxResults)
         {
         Write-Host "[!] The Internet Archive has more than $MaxResults matching addresses for $Domain. Only the first $MaxResults were read, so this list is incomplete."
+        if ($null -ne $Remark) { $Remark.Value = 'incomplete' }
         }
 
     $entries
@@ -989,13 +1172,19 @@ Function Get-TargetFiles{
         #Optional: the wanted file types. Every saved file gets a name that ends in one of them.
         [Parameter(Mandatory = $false)]
         [string[]]
-        $FileTypes = @()
+        $FileTypes = @(),
+
+        #Optional: a [ref] that is given what was done, for the summary of a run: a table with the
+        #entries Downloaded, Failed and Path.
+        [Parameter(Mandatory = $false)]
+        [ref]
+        $Result
 
         )
 
         $links = @($targetlinks | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne '' })
 
-        Write-Output ('[*] Downloading ' + $links.Count + ' files now.')
+        Write-Output ('[*] Downloading ' + (Get-JustOSINTCount -Count $links.Count) + ' now.')
         if ($links.Count -eq 0) { return }
 
         if ($OutputDir -eq "")
@@ -1118,6 +1307,7 @@ public static class JustOSINTTrustAllCertificates {
         $marker = '[+]'
         if ($downloaded -eq 0) { $marker = '[-]' }
         Write-Output ($marker + ' Downloaded ' + (Get-JustOSINTCount -Count $downloaded) + " to $OutputPath ($failed failed).")
+        if ($null -ne $Result) { $Result.Value = @{ Downloaded = $downloaded; Failed = $failed; Path = $OutputPath } }
 }
 
 #Finds exiftool next to this script or on the PATH. The current directory is deliberately not searched:
@@ -1228,7 +1418,12 @@ Function ExtractMetadata{
 
         [Parameter(Position = 1, Mandatory = $false)]
         [string]
-        $ExtractAllToCsv = ""
+        $ExtractAllToCsv = "",
+
+        #Optional: a [ref] that is given a few words on what was extracted, for the summary of a run
+        [Parameter(Mandatory = $false)]
+        [ref]
+        $Summary
         )
 
         if ($OutputDir -eq "" -or -not (Test-Path -LiteralPath $OutputDir -PathType Container))
@@ -1260,6 +1455,7 @@ Function ExtractMetadata{
             if ($csv.Count -lt 2)
                 {
                 Write-Output "[-] ExifTool found no metadata in $OutputDir."
+                if ($null -ne $Summary) { $Summary.Value = 'none found' }
                 return
                 }
             try
@@ -1281,7 +1477,9 @@ Function ExtractMetadata{
                 $csvEncoding = 'UTF8'
                 if ($PSVersionTable.PSVersion.Major -ge 6) { $csvEncoding = 'utf8BOM' }
                 Set-Content -LiteralPath $ExtractAllToCsv -Value $csv -Encoding $csvEncoding -ErrorAction Stop
-                Write-Output ('[+] Metadata for ' + ($rows - 1) + " files was written to $ExtractAllToCsv")
+                $described = Get-JustOSINTCount -Count ($rows - 1)
+                Write-Output ('[+] Metadata for ' + $described + " was written to $ExtractAllToCsv")
+                if ($null -ne $Summary) { $Summary.Value = 'all fields of ' + $described + ", in $ExtractAllToCsv" }
                 }
             catch
                 {
@@ -1331,14 +1529,15 @@ Function ExtractMetadata{
         if ($uniquemeta.Count -eq 0)
             {
             Write-Output "[-] No 'Author' or 'Creator' metadata was found."
+            if ($null -ne $Summary) { $Summary.Value = "no 'Author' or 'Creator' values" }
             }
         else
             {
             Write-Output ("[+] Extracted 'Author' and 'Creator' metadata (" + (Get-JustOSINTCount -Count $uniquemeta.Count -Noun 'value') + ')')
             Write-Output ''
             foreach ($value in $uniquemeta) { Write-Output ('    ' + $value) }
+            if ($null -ne $Summary) { $Summary.Value = Get-JustOSINTCount -Count $uniquemeta.Count -Noun "'Author' and 'Creator' value" }
             }
-        Write-Output ''
 }
 
 #SHA-256 of a file as lower-case hex

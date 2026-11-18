@@ -55,11 +55,6 @@ The start and the end of a run look like this:
 
 [*] Asking the Internet Archive which files it has seen on targetdomain.com
 ...
-[*] Files found, by source
-    Internet Archive             3
-    Google (browser)             2
-    Bing (browser)        left out
-    DuckDuckGo (browser)         1
 [+] A total of 5 files were discovered on targetdomain.com.
 
 [+] The links were written to targetdomain.com-links.txt
@@ -82,12 +77,30 @@ The start and the end of a run look like this:
 
 [*] Summary for targetdomain.com
     Files found      : 5
+    Link list        : targetdomain.com-links.txt
     Files downloaded : 5
     Saved to         : /home/you/targetdomain.com-files
     Metadata         : 8 'Author' and 'Creator' values
+
+    Files by type
+        pdf   3
+        docx  1
+        xlsx  1
+
+    Files by source
+        Internet Archive      3
+        Google (browser)      2
+        Bing (browser)        0  (left out)
+        DuckDuckGo (browser)  1
+        (a file that several sources gave is counted for each of them)
 ```
 
 Lines are marked `[*]` for what is being done, `[+]` for something found, `[-]` for nothing found, `[!]` for a problem and `[?]` for a question.
+
+Every run ends with this summary, made to fit in one screenshot, also a run that finds nothing, downloads nothing, or is stopped with Ctrl+C during the search:
+
+- **Files by type** lists every file type that was asked for, with the number of files found. A file counts as the type it is saved as.
+- **Files by source** says how many files each source gave. Two sources often know the same file, so these numbers can add up to more than the total; the summary says so when they do. A source that did not get through carries a remark: `left out` (it was not used, for example Bing when it does not keep to the site), `stopped early` (it gave some files and then refused, or the search was cut short), `did not answer`, or `incomplete` (the Internet Archive holds more addresses than were read).
 
 ## Where the files are found
 
@@ -206,7 +219,7 @@ PS C:\> Invoke-JustOSINT -TargetDomain targetdomain.com -MaxSearchPages 2 -Extra
 PS C:\> ExtractMetadata -OutputDir .\2026-11-18-144953\ -ExtractAllToCsv all-target-metadata.csv
 ```
 
-The PowerShell version asks the Internet Archive, Bing and DuckDuckGo with plain web requests. It does not search Google and has no browser search.
+The PowerShell version asks the Internet Archive, Bing and DuckDuckGo with plain web requests. It does not search Google and has no browser search. `Invoke-JustOSINT` ends with the same summary as the Python version.
 
 ```
 TargetDomain        - The target domain to search for files.

@@ -1063,11 +1063,11 @@ def search(engines, domain, file_types, max_pages=5, delay=2, browser_name="chro
     found when the search ends early. Ctrl+C is passed on to the caller, after the browser has been closed.
     lookup says how the address of a Google result that hides it is read: "click" (the result is clicked
     in the window), "request" (Google's link is asked with a plain web request first) or "off".
-    tallies, if given, is a list that gets one (name, number of files or a remark) entry per search engine.
+    tallies, if given, is a list that gets one (name, number of files, remark) entry per search engine.
     """
     def tally(engine, count, stopped):
         if tallies is not None:
-            tallies.append((NAMES[engine] + " (browser)", sources.tally_value(count, stopped)))
+            tallies.append(sources.tally_row(NAMES[engine] + " (browser)", count, stopped))
 
     try:
         session = Session(

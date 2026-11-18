@@ -42,17 +42,58 @@ def log_settings(rows):
         log("[*] %-*s : %s" % (width, name, value))
 
 
-def log_table(title, rows, numbers=False):
+def log_table(title, rows, numbers=False, indent=4):
     """A title, and under it one indented line per row with the values in a column of their own.
     numbers=True puts the values against the right edge of their column, as in a table of counts."""
     log(title)
+    if not rows:
+        return
     names = max(len(str(name)) for name, _ in rows)
     values = max(len(str(value)) for _, value in rows)
     for name, value in rows:
         if numbers:
-            log("    %-*s  %*s" % (names, name, values, value))
+            log("%s%-*s  %*s" % (" " * indent, names, name, values, value))
         else:
-            log("    %-*s : %s" % (names, name, value))
+            log("%s%-*s : %s" % (" " * indent, names, name, value))
+
+
+def files_by_type(file_links, file_types):
+    """How many of the links there are of each wanted file type: a list of (type, number), in the order
+    the types were asked for. Links of no wanted type (a list of links can hold them) come last, as "other"."""
+    counts = dict.fromkeys(file_types, 0)
+    other = 0
+    for link in file_links:
+        file_type = links.file_type_of(link, file_types)
+        if file_type is None:
+            other += 1
+        else:
+            counts[file_type] += 1
+    rows = [(file_type, counts[file_type]) for file_type in file_types]
+    if other:
+        rows.append(("other", other))
+    return rows
+
+
+def log_summary(subject, rows, by_type=(), by_source=(), files=0):
+    """The closing summary of a run, made to fit in one screenshot: a few "name : value" rows, then how
+    many files there are of each type, then how many each source gave.
+
+    by_source holds (name, number of files, remark) and files is the number of different files found.
+    """
+    log_table("[*] Summary for %s" % subject, rows)
+    if by_type:
+        log()
+        log_table("    Files by type", by_type, numbers=True, indent=8)
+    if by_source:
+        log()
+        log("    Files by source")
+        names = max(len(name) for name, _, _ in by_source)
+        numbers = max(len(str(count)) for _, count, _ in by_source)
+        for name, count, remark in by_source:
+            log("        %-*s  %*d%s" % (names, name, numbers, count, "  (%s)" % remark if remark else ""))
+        # Two sources often know the same file, so their numbers can add up to more than there are files
+        if sum(count for _, count, _ in by_source) > files:
+            log("        (a file that several sources gave is counted for each of them)")
 
 
 def ask_yes_no(question):
@@ -99,7 +140,8 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
 
     Returns (sorted links, {link: address of the Internet Archive's copy}, interrupted, tallies).
     interrupted is True if Ctrl+C ended the search early; what had been found by then is still returned.
-    tallies says for each source what it gave: a list of (name, number of files or a remark).
+    tallies says for each source what it gave: a list of (name, number of files, remark), where the
+    remark tells of a source that did not get through ("left out", "stopped early", "did not answer").
     """
     found, by_key, archive_copies = [], {}, {}
 
@@ -112,9 +154,10 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
             found.append(link)
         return by_key[key]
 
-    archive_entries = []
+    archive_entries, archive_remark = [], ""
     from_bing, from_duckduckgo = set(), set()
     left_out = set()
+    done = set()  # the sources that were asked to the end
     browser_tallies = []
     interrupted = False
     # An engine that is searched through the browser is not also asked with plain requests
@@ -124,7 +167,10 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
         # The Internet Archive answers for all file types in a single request. Its index is a service
         # for programs, so it is told who is asking unless another User-Agent was asked for.
         if "archive" in http_sources:
-            archive_entries = sources.search_archive(Fetcher(user_agent or PROGRAM_USER_AGENT), domain, file_types, log=log)
+            archive_entries, archive_remark = sources.search_archive(
+                Fetcher(user_agent or PROGRAM_USER_AGENT), domain, file_types, log=log
+            )
+            done.add("archive")
 
         # One session per search engine, so that the cookies it sets are sent back as a browser would
         bing = Fetcher(user_agent or DEFAULT_USER_AGENT)
@@ -157,6 +203,7 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
                     from_duckduckgo.add(keep(link))
                 if duckduckgo_blocked:
                     left_out.add("duckduckgo")
+        done.update(engines)
 
         if browser_engines:
             from . import browser
@@ -178,12 +225,16 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
     for entry in archive_entries:
         archive_copies.setdefault(keep(entry.link), entry.archive_copy)
 
+    # A source that was not asked to the end (left out, or cut short by Ctrl+C) is marked as such
     tallies = []
     if "archive" in http_sources:
-        tallies.append((SOURCE_NAMES["archive"], len(archive_entries)))
+        tallies.append(sources.tally_row(SOURCE_NAMES["archive"], len(archive_entries), "archive" not in done, archive_remark))
     for name, links_found in (("bing", from_bing), ("duckduckgo", from_duckduckgo)):
         if name in asked:
-            tallies.append((SOURCE_NAMES[name], sources.tally_value(len(links_found), name in left_out)))
+            tallies.append(sources.tally_row(SOURCE_NAMES[name], len(links_found), name in left_out or name not in done))
+    if browser_engines and not browser_tallies:
+        # The search was cut short before the browser search had begun
+        browser_tallies = [sources.tally_row(SOURCE_NAMES[name] + " (browser)", 0, True) for name in browser_engines]
     tallies.extend(browser_tallies)
     return sorted(found), archive_copies, interrupted, tallies
 
@@ -282,13 +333,11 @@ def extract_metadata(folder, csv_path=None):
     log()
     if not values:
         log("[-] No 'Author' or 'Creator' metadata was found.")
-        log()
         return True, "no 'Author' or 'Creator' values"
     log("[+] Extracted 'Author' and 'Creator' metadata (%s)" % counted(len(values), "value"))
     log()
     for value in values:
         log("    " + value)
-    log()
     return True, "%d 'Author' and 'Creator' %s" % (len(values), "value" if len(values) == 1 else "values")
 
 
@@ -440,8 +489,16 @@ def _run(argv):
             return 1
 
     archive_copies = {}
+    tallies = []
     listed = True  # False while the links that were found exist nowhere but in this run
     summary = []
+
+    def finish(status):
+        # Every run that searched, or read a list of links, ends with the summary
+        log()
+        log_summary(subject, summary, files_by_type(file_links, file_types), tallies, len(file_links))
+        return status
+
     if args.list_in:
         # If a list of links was given, use that instead of searching
         if not os.path.isfile(args.list_in):
@@ -483,13 +540,13 @@ def _run(argv):
             args.browser_name, args.google_lookup,
         )
         log()
-        if tallies:
-            log_table("[*] Files found, by source", tallies, numbers=True)
         log("%s A total of %s discovered on %s." % ("[+]" if file_links else "[-]", counted(len(file_links), verb=True), domain))
         log()
-        summary.append(("Files found", len(file_links)))
+        summary.append(("Files found", "%d (the search was interrupted)" % len(file_links) if interrupted else len(file_links)))
 
         saved = bool(args.list_out and file_links) and write_link_list(args.list_out, file_links)
+        if saved:
+            summary.append(("Link list", args.list_out))
         # With --list-out the links are in the file, or were printed when it could not be written
         listed = bool(args.list_out)
         if interrupted:
@@ -499,11 +556,11 @@ def _run(argv):
                 log("[*] The links found so far (use --list-out FILE to have them written to a file):")
                 for link in file_links:
                     log("    " + link)
-            return 130
+            return finish(130)
 
     if not file_links:
         log("[-] Nothing to download.")
-        return 0
+        return finish(0)
 
     # If no output directory was named, use one named after the current date and time
     output_dir = args.output_dir or datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
@@ -518,18 +575,18 @@ def _run(argv):
                 log("[*] The links that were found (use --list-out FILE to have them written to a file):")
                 for link in file_links:
                     log("    " + link)
-            return 1
+            return finish(1)
         summary.append(("Files downloaded", "%d (%d failed)" % (downloaded, failed) if failed else downloaded))
         if downloaded == 0:
             # Every download failed: there is nothing to extract metadata from
-            return 1 if failed else 0
+            return finish(1 if failed else 0)
         summary.append(("Saved to", os.path.abspath(output_dir)))
     else:
         log("[*] No files will be downloaded.")
 
     # Without a folder of files there is nothing to extract metadata from
     if not os.path.isdir(output_dir):
-        return status
+        return finish(status)
 
     if args.extract or ask_yes_no("Would you like to extract metadata from all of the files downloaded now?"):
         worked, extracted = extract_metadata(output_dir, args.csv or None)
@@ -543,5 +600,4 @@ def _run(argv):
             'python -m justosint --extract-dir "%s"' % output_dir
         )
 
-    log_table("[*] Summary for %s" % subject, summary)
-    return status
+    return finish(status)
