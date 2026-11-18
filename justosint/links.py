@@ -21,7 +21,6 @@ DEFAULT_FILE_TYPES = ["pdf", "docx", "xlsx", "doc", "xls", "pptx", "ppt"]
 ArchiveEntry = namedtuple("ArchiveEntry", ["link", "archive_copy"])
 
 # A copy is fetched as <prefix><timestamp>id_/<address as captured>; "id_" asks for the file as it was saved.
-# Kept in a variable so the tests can point it at a local server.
 ARCHIVE_COPY_PREFIX = "https://web.archive.org/web/"
 
 _HREF = re.compile(r"""<a\s[^>]*?href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.I)

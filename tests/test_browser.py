@@ -3,9 +3,10 @@
 These tests never open Google, Bing or DuckDuckGo. They need Selenium and Chrome, so they only run when
 asked for:
 
-    POWERMETA_BROWSER_TESTS=1 python -m unittest tests.test_browser
+    JUSTOSINT_BROWSER_TESTS=1 python -m unittest tests.test_browser
 """
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -13,7 +14,7 @@ import time
 import unittest
 import urllib.parse
 
-from powermeta import browser, web
+from justosint import browser, web
 
 from .support import LocalServer, bing_page, duckduckgo_page, fixture, patched
 
@@ -24,11 +25,11 @@ try:
 except ImportError:
     HAVE_SELENIUM = False
 
-WANTED = os.environ.get("POWERMETA_BROWSER_TESTS") == "1"
+WANTED = os.environ.get("JUSTOSINT_BROWSER_TESTS") == "1"
 
-# The tests normally run the browser without a window. POWERMETA_BROWSER_TESTS_WINDOW=1 shows it.
+# The tests normally run the browser without a window. JUSTOSINT_BROWSER_TESTS_WINDOW=1 shows it.
 ARGUMENTS = ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
-if os.environ.get("POWERMETA_BROWSER_TESTS_WINDOW") != "1":
+if os.environ.get("JUSTOSINT_BROWSER_TESTS_WINDOW") != "1":
     ARGUMENTS.append("--headless=new")
 
 SEARCH_BOX = "<form action='/search'><input name='q' value='site:localhost filetype:pdf'></form>"
@@ -107,26 +108,26 @@ class Unavailable(unittest.TestCase):
 
     @unittest.skipUnless(HAVE_SELENIUM, "needs Selenium")
     def test_a_profile_folder_that_cannot_be_made_is_reported_not_raised(self):
-        folder = tempfile.mkdtemp(prefix="powermeta-browser-test-")
+        folder = tempfile.mkdtemp(prefix="justosint-browser-test-")
         self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
         blocker = os.path.join(folder, "a file")
         open(blocker, "w").close()
         messages = []
-        with patched(browser, PROFILE_FOLDER=os.path.join(blocker, "browser-chrome")):
+        with patched(browser, _profile_folder=lambda name: os.path.join(blocker, "browser-" + name)):
             self.assertEqual(browser.search(["bing"], "example.com", ["pdf"], log=messages.append), [])
         self.assertIn("cannot be used", "\n".join(messages))
 
 
-@unittest.skipUnless(WANTED and HAVE_SELENIUM, "set POWERMETA_BROWSER_TESTS=1 (needs Selenium and Chrome)")
+@unittest.skipUnless(WANTED and HAVE_SELENIUM, "set JUSTOSINT_BROWSER_TESTS=1 (needs Selenium and Chrome)")
 class InARealBrowser(unittest.TestCase):
     """The search engines are played by a local server on 127.0.0.1; the "target site" is the same server
     under the name localhost, so that result links lead to a different host, as they do in real life."""
 
     def setUp(self):
-        self.profile = tempfile.mkdtemp(prefix="powermeta-browser-test-")
+        self.profile = tempfile.mkdtemp(prefix="justosint-browser-test-")
         self.addCleanup(shutil.rmtree, self.profile, ignore_errors=True)
         # Where the browser would save a download. Whatever a test does, nothing may ever arrive here.
-        self.downloads = tempfile.mkdtemp(prefix="powermeta-browser-test-downloads-")
+        self.downloads = tempfile.mkdtemp(prefix="justosint-browser-test-downloads-")
         self.addCleanup(shutil.rmtree, self.downloads, ignore_errors=True)
         self.addCleanup(self.nothing_was_saved)
         self.arguments = list(ARGUMENTS)
@@ -191,7 +192,7 @@ class InARealBrowser(unittest.TestCase):
             return (204, "")
         if request.path == "/goto":
             token = request.query["url"][0]
-            by_program = "PowerMeta" in request.headers.get("User-Agent", "") or "Example" in request.headers.get("User-Agent", "")
+            by_program = "justOSINT" in request.headers.get("User-Agent", "") or "Example" in request.headers.get("User-Agent", "")
             if by_program and self.plain_requests_refused:
                 return (200, CONTINUE_PAGE)
             if self.check_pending["link"]:
@@ -322,19 +323,41 @@ class InARealBrowser(unittest.TestCase):
                 super().__init__(*args, **kwargs)
                 outer.sessions.append(self)
 
-        return patched(
-            browser,
-            GOOGLE_URL=server.url + "/search",
-            BING_URL=server.url + "/bing",
-            DUCKDUCKGO_URL=server.url + "/html/",
-            EXTRA_ARGUMENTS=self.arguments,
-            EXTRA_PREFERENCES={"download.default_directory": self.downloads},
-            PROFILE_FOLDER=self.profile,
-            LOOKUP_WAIT=3,
-            CLICK_WAIT=1,
-            SHOWN_WAIT=0.5,
-            Session=Recorded,
+        # The browser is started the way the program starts it. What a test needs on top of that (no
+        # window, a folder for downloads that has to stay empty, a throw-away profile) is given to
+        # Selenium from here.
+        from selenium import webdriver
+
+        real_options = webdriver.ChromeOptions
+        arguments, downloads = list(self.arguments), self.downloads
+
+        class TestOptions(real_options):
+            def __init__(self):
+                super().__init__()
+                for argument in arguments:
+                    self.add_argument(argument)
+
+            def add_experimental_option(self, name, value):
+                if name == "prefs":
+                    value = dict(value, **{"download.default_directory": downloads})
+                return super().add_experimental_option(name, value)
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(patched(webdriver, ChromeOptions=TestOptions))
+        stack.enter_context(
+            patched(
+                browser,
+                GOOGLE_URL=server.url + "/search",
+                BING_URL=server.url + "/bing",
+                DUCKDUCKGO_URL=server.url + "/html/",
+                _profile_folder=lambda name: self.profile,
+                LOOKUP_WAIT=3,
+                CLICK_WAIT=1,
+                SHOWN_WAIT=0.5,
+                Session=Recorded,
+            )
         )
+        return stack
 
     def run_search(self, engines, file_types, max_pages=3, **more):
         with LocalServer(self.respond) as server:
@@ -669,21 +692,19 @@ class InARealBrowser(unittest.TestCase):
         self.assertEqual(sorted(found), [self.target + "/files/b1.pdf", self.target + "/files/b2.pdf"])
         self.assertIn("[*] Google is skipped for the rest of this run.", self.messages)
 
-    def test_pages_are_saved_when_asked_for(self):
-        folder = os.path.join(self.profile, "saved pages")
-        self.check_pending["google"] = True
-        self.run_search(["google", "bing"], ["pdf"], save_pages=folder)
-        names = sorted(os.listdir(folder))
-        self.assertEqual(
-            [name.split("-", 1)[1] for name in names],
-            ["google-check.html", "google-pdf-page-1.html", "google-pdf-page-2.html", "bing-site.html", "bing-pdf-page-1.html", "bing-pdf-page-2.html", "bing-pdf-page-3.html"],
-        )
-        with open(os.path.join(folder, names[1]), encoding="utf-8") as saved:
-            text = saved.read()
-        self.assertTrue(text.startswith("<!-- http://127.0.0.1:"))
-        self.assertIn("a result that hides its address", text)
-
     # -- Bing and DuckDuckGo --------------------------------------------------------------------------------
+
+    def test_what_each_search_engine_gave_is_reported(self):
+        # Google is skipped by the person, Bing does not keep to the site, DuckDuckGo is searched through
+        self.check_pending["google"] = True
+        self.bing_site_answer = "others"
+        self.answer = lambda question: "s"
+        tallies = []
+        found, _ = self.run_search(["google", "bing", "duckduckgo"], ["pdf"], tallies=tallies)
+        self.assertEqual(tallies, [("Google (browser)", "left out"), ("Bing (browser)", "left out"), ("DuckDuckGo (browser)", 3)])
+        self.assertEqual(len(found), 3)
+        self.assertIn("[+] DuckDuckGo (browser): 3 pdf files found", self.messages)
+        self.assertIn("[-] Google (browser): no pdf files found", self.messages)
 
     def test_bing_pages(self):
         found, requests = self.run_search(["bing"], ["pdf"])
@@ -863,7 +884,7 @@ class InARealBrowser(unittest.TestCase):
 
     def test_the_browser_says_it_is_automated(self):
         with LocalServer(lambda request: (200, "<html><body>hello</body></html>")) as server:
-            with patched(browser, EXTRA_ARGUMENTS=ARGUMENTS, PROFILE_FOLDER=self.profile):
+            with self.started(server):
                 session = browser.Session(log=self.messages.append, ask=self.answer)
                 try:
                     session._go(server.url + "/")

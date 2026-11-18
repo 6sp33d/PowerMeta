@@ -1,7 +1,7 @@
 import base64
 import unittest
 
-from powermeta import links
+from justosint import links
 
 from .support import duckduckgo_page, fixture
 

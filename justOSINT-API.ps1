@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    PowerMeta-API - Find files hosted on target domains using Google Custom Search API
+    justOSINT-API - Find files hosted on target domains using Google Custom Search API
 
 .DESCRIPTION
     This script uses Google's Custom Search API to find publicly available files (PDF, DOCX, XLSX, etc.)
@@ -11,7 +11,7 @@
     web"; they only search the sites on their own "Sites to search" list, so the target domain has to
     be added to that list. See the README for what to use instead.
 
-    PowerMeta.ps1 must be in the same folder as this script (it holds the download and metadata code).
+    justOSINT.ps1 must be in the same folder as this script (it holds the download and metadata code).
 
 .PARAMETER TargetDomain
     The target domain to search for files (e.g., "example.com")
@@ -51,19 +51,19 @@
     Switch to enable verbose output showing URLs returned by API
 
 .EXAMPLE
-    .\PowerMeta-API.ps1 -TargetDomain "example.com" -ApiKey "YOUR_API_KEY" -SearchEngineId "YOUR_SEARCH_ENGINE_ID"
+    .\justOSINT-API.ps1 -TargetDomain "example.com" -ApiKey "YOUR_API_KEY" -SearchEngineId "YOUR_SEARCH_ENGINE_ID"
 
 .EXAMPLE
-    .\PowerMeta-API.ps1 -TargetDomain "example.com" -ApiKey "YOUR_API_KEY" -SearchEngineId "YOUR_SEARCH_ENGINE_ID" -FileTypes "pdf,xlsx" -MaxResults 50 -OutputFile "results.txt"
+    .\justOSINT-API.ps1 -TargetDomain "example.com" -ApiKey "YOUR_API_KEY" -SearchEngineId "YOUR_SEARCH_ENGINE_ID" -FileTypes "pdf,xlsx" -MaxResults 50 -OutputFile "results.txt"
 
 .EXAMPLE
-    .\PowerMeta-API.ps1 -TargetDomain "example.com" -ApiKey "YOUR_API_KEY" -SearchEngineId "YOUR_SEARCH_ENGINE_ID" -Download -OutputDir "downloads"
+    .\justOSINT-API.ps1 -TargetDomain "example.com" -ApiKey "YOUR_API_KEY" -SearchEngineId "YOUR_SEARCH_ENGINE_ID" -Download -OutputDir "downloads"
 
 .EXAMPLE
-    .\PowerMeta-API.ps1 -TargetDomain "example.com" -ApiKey "YOUR_API_KEY" -SearchEngineId "YOUR_SEARCH_ENGINE_ID" -Download -Extract -OutputDir "downloads"
+    .\justOSINT-API.ps1 -TargetDomain "example.com" -ApiKey "YOUR_API_KEY" -SearchEngineId "YOUR_SEARCH_ENGINE_ID" -Download -Extract -OutputDir "downloads"
 
 .EXAMPLE
-    .\PowerMeta-API.ps1 -TargetDomain "example.com" -ApiKey "YOUR_API_KEY" -SearchEngineId "YOUR_SEARCH_ENGINE_ID" -Download -Extract -ExtractAllToCsv "metadata.csv" -OutputDir "downloads"
+    .\justOSINT-API.ps1 -TargetDomain "example.com" -ApiKey "YOUR_API_KEY" -SearchEngineId "YOUR_SEARCH_ENGINE_ID" -Download -Extract -ExtractAllToCsv "metadata.csv" -OutputDir "downloads"
 
 .NOTES
     Author: Beau Bullock (@dafthack)
@@ -119,13 +119,13 @@ param(
     [switch]$ShowUrls
 )
 
-# The download and metadata functions are shared with PowerMeta.ps1
-$powerMetaCore = Join-Path $PSScriptRoot 'PowerMeta.ps1'
-if (-not (Test-Path -LiteralPath $powerMetaCore -PathType Leaf)) {
-    Write-Host "[!] PowerMeta.ps1 was not found in $PSScriptRoot. Keep PowerMeta.ps1 and PowerMeta-API.ps1 in the same folder."
+# The download and metadata functions are shared with justOSINT.ps1
+$justOSINTCore = Join-Path $PSScriptRoot 'justOSINT.ps1'
+if (-not (Test-Path -LiteralPath $justOSINTCore -PathType Leaf)) {
+    Write-Host "[!] justOSINT.ps1 was not found in $PSScriptRoot. Keep justOSINT.ps1 and justOSINT-API.ps1 in the same folder."
     exit 1
 }
-. $powerMetaCore
+. $justOSINTCore
 
 # Number of API requests that failed during this run
 $apiErrors = 0
@@ -294,9 +294,8 @@ function Read-YesNo {
 }
 
 # Main execution
-Write-Host "=========================================="
-Write-Host "PowerMeta-API - Google Custom Search Tool"
-Write-Host "=========================================="
+Write-JustOSINTBanner | Out-Host
+Write-Host "[*] justOSINT-API: searching with the Google Custom Search API"
 Write-Host ""
 
 if ((Get-Date) -ge [datetime]'2027-01-01') {
@@ -315,8 +314,8 @@ if (-not (Test-APICredentials -ApiKey $ApiKey -SearchEngineId $SearchEngineId)) 
 }
 
 # Parse the target domain and file types
-$domain = Get-PowerMetaHostName $TargetDomain
-$fileTypeArray = @(Get-PowerMetaFileTypeList $FileTypes)
+$domain = Get-JustOSINTHostName $TargetDomain
+$fileTypeArray = @(Get-JustOSINTFileTypeList $FileTypes)
 if ($domain -eq '' -or $fileTypeArray.Count -eq 0) {
     Write-Host "[!] Nothing to search for. Check -TargetDomain and -FileTypes."
     exit 1
@@ -421,6 +420,6 @@ if ($doExtract) {
 }
 else {
     Write-Host "[*] No metadata will be extracted at this time."
-    Write-Host "[*] If you wish to extract metadata later, load PowerMeta.ps1 and run:"
+    Write-Host "[*] If you wish to extract metadata later, load justOSINT.ps1 and run:"
     Write-Host "    ExtractMetadata -OutputDir `"$OutputDir`""
 }

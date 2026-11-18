@@ -1,7 +1,7 @@
-﻿# PowerMeta
+﻿# justOSINT
 # Finds documents that a domain has published, downloads them, and reads the metadata
 # (author, creator, ...) out of them with ExifTool.
-# Original author: Beau Bullock (@dafthack)
+# Based on PowerMeta. Original author: Beau Bullock (@dafthack)
 #
 # Keep this file plain ASCII: Windows PowerShell 5.1 misreads other characters in script files.
 
@@ -18,26 +18,48 @@
     } catch { }
 }
 
-Function Invoke-PowerMeta{
+#The name in large letters (FIGlet font "slant"), with the tagline under it
+function Write-JustOSINTBanner {
+    Write-Output ''
+    Write-Output '       _            __  ____  _____ _____   ________'
+    Write-Output '      (_)_  _______/ /_/ __ \/ ___//  _/ | / /_  __/'
+    Write-Output '     / / / / / ___/ __/ / / /\__ \ / //  |/ / / /'
+    Write-Output '    / / /_/ (__  ) /_/ /_/ /___/ // // /|  / / /'
+    Write-Output ' __/ /\__,_/____/\__/\____//____/___/_/ |_/ /_/'
+    Write-Output '/___/'
+    Write-Output ''
+    Write-Output "           It's not theft, it's justOSINT"
+    Write-Output ''
+}
+
+#The line that says what a source gave: "[+] Bing: 3 pdf files found" or "[-] Bing: no pdf files found"
+function Get-JustOSINTTally {
+    param([string]$Source, [int]$Count, [string]$What = 'files')
+
+    if ($Count -gt 0) { return ('[+] ' + $Source + ': ' + $Count + ' ' + $What + ' found') }
+    return ('[-] ' + $Source + ': no ' + $What + ' found')
+}
+
+Function Invoke-JustOSINT{
 
     <#
     .SYNOPSIS
-    This function searches for publicly available files hosted on a particular domain by using search engine queries such as "site:targetdomain.com filetype:pdf". It then allows for the download of those files from the target domain. After retrieving the files, the metadata associated with them can be analyzed by PowerMeta. Some interesting things commonly found in metadata are usernames, domains, software titles, and computer names.
+    This function searches for publicly available files hosted on a particular domain by using search engine queries such as "site:targetdomain.com filetype:pdf". It then allows for the download of those files from the target domain. After retrieving the files, the metadata associated with them can be analyzed by justOSINT. Some interesting things commonly found in metadata are usernames, domains, software titles, and computer names.
 
-    PowerMeta Function: Invoke-PowerMeta
-    Author: Beau Bullock (@dafthack)
+    justOSINT Function: Invoke-JustOSINT
+    Based on PowerMeta by Beau Bullock (@dafthack)
     License: BSD 3-Clause
     Required Dependencies: None
     Optional Dependencies: ExifTool 12.24 or later for metadata extraction (see Install-ExifTool)
 
     .DESCRIPTION
-    This function searches for publicly available files hosted on a particular domain by using search engine queries such as "site:targetdomain.com filetype:pdf". It then allows for the download of those files from the target domain. After retrieving the files, the metadata associated with them can be analyzed by PowerMeta. Some interesting things commonly found in metadata are usernames, domains, software titles, and computer names.
+    This function searches for publicly available files hosted on a particular domain by using search engine queries such as "site:targetdomain.com filetype:pdf". It then allows for the download of those files from the target domain. After retrieving the files, the metadata associated with them can be analyzed by justOSINT. Some interesting things commonly found in metadata are usernames, domains, software titles, and computer names.
 
     .PARAMETER TargetDomain
     The target domain to search for files.
 
     .PARAMETER FileTypes
-    A comma seperated list of file extensions to search for. By default PowerMeta searches for "pdf, docx, xlsx, doc, xls, pptx, ppt". A downloaded file keeps its name only if it ends in one of these types (also with -TargetFileList); other names get the type or ".download" added.
+    A comma seperated list of file extensions to search for. By default justOSINT searches for "pdf, docx, xlsx, doc, xls, pptx, ppt". A downloaded file keeps its name only if it ends in one of these types (also with -TargetFileList); other names get the type or ".download" added.
 
     .PARAMETER OutputList
     A file to output the list of links discovered through web searching to.
@@ -58,7 +80,7 @@ Function Invoke-PowerMeta{
     All metadata (not just the default fields) will be extracted from files to a CSV specified with this flag.
 
     .PARAMETER UserAgent
-    Change the default User Agent used by PowerMeta.
+    Change the default User Agent used by justOSINT.
 
     .PARAMETER MaxSearchPages
     The maximum number of pages to search on each search engine.
@@ -71,35 +93,35 @@ Function Invoke-PowerMeta{
 
     .Example
 
-    C:\PS> Invoke-PowerMeta -TargetDomain targetdomain.com
+    C:\PS> Invoke-JustOSINT -TargetDomain targetdomain.com
     Description
     -----------
     This command will search for files on the 'targetdomain.com' domain ending with a file extension of pdf, docx, xlsx, doc, xls, pptx, or ppt. Once it has finished crafting this list it will prompt the user asking if they wish to download the files from the target domain. After downloading files it will prompt again for extraction of metadata from those files.
 
     .Example
 
-    C:\PS> Invoke-PowerMeta -TargetDomain targetdomain.com -FileTypes "pdf, xml" -Download -Extract
+    C:\PS> Invoke-JustOSINT -TargetDomain targetdomain.com -FileTypes "pdf, xml" -Download -Extract
     Description
     -----------
     This command will search for files on the 'targetdomain.com' domain ending with a file extension of pdf, or xml. It will then automatically download them from the target domain and extract metadata.
 
     .Example
 
-    C:\PS> Invoke-PowerMeta -TargetDomain targetdomain.com -OutputList target-domain-links.txt
+    C:\PS> Invoke-JustOSINT -TargetDomain targetdomain.com -OutputList target-domain-links.txt
     Description
     -----------
     This command will search for files on the 'targetdomain.com' domain and write the links of the files found to disk in a file called "target-domain-links.txt".
 
     .Example
 
-    C:\PS> Invoke-PowerMeta -TargetDomain targetdomain.com -TargetFileList target-domain-links.txt
+    C:\PS> Invoke-JustOSINT -TargetDomain targetdomain.com -TargetFileList target-domain-links.txt
     Description
     -----------
     This command skips searching and uses the links listed in "target-domain-links.txt" (one per line) instead.
 
     .Example
 
-    C:\PS> Invoke-PowerMeta -TargetDomain targetdomain.com -MaxSearchPages 2 -ExtractAllToCsv all-target-metadata.csv
+    C:\PS> Invoke-JustOSINT -TargetDomain targetdomain.com -MaxSearchPages 2 -ExtractAllToCsv all-target-metadata.csv
     Description
     -----------
     This command will search for files on the 'targetdomain.com' domain but only search the first two pages of results. All metadata (not just the default fields) will be saved in a CSV called all-target-metadata.csv.
@@ -166,6 +188,8 @@ Function Invoke-PowerMeta{
 
         )
 
+    Write-JustOSINTBanner
+
     $targetlinks = @()
 
     #For links found through the Internet Archive: where the Archive keeps its copy of the file.
@@ -173,11 +197,11 @@ Function Invoke-PowerMeta{
     $archiveCopies = New-Object System.Collections.Hashtable
 
     #If no target file list was provided we will perform searches and craft one.
-    $filetypearray = @(Get-PowerMetaFileTypeList $FileTypes)
+    $filetypearray = @(Get-JustOSINTFileTypeList $FileTypes)
 
     If ($TargetFileList -eq "")
         {
-            $domain = Get-PowerMetaHostName $TargetDomain
+            $domain = Get-JustOSINTHostName $TargetDomain
             if ($domain -notmatch '^[\p{L}\p{N}]([\p{L}\p{N}.\-]*[\p{L}\p{N}])?$')
                 {
                 Write-Output "[!] '$TargetDomain' is not a domain name. Use a name such as targetdomain.com."
@@ -190,6 +214,12 @@ Function Invoke-PowerMeta{
                 return
                 }
 
+            $sourceNames = @($SearchEngines | ForEach-Object { if ($_ -eq 'Archive') { 'Internet Archive' } else { $_ } })
+            Write-Output "[*] Target domain : $domain"
+            Write-Output ('[*] File types    : ' + ($filetypearray -join ', '))
+            Write-Output ('[*] Sources       : ' + ($sourceNames -join ', '))
+            Write-Output ''
+
             $validlinks = New-Object System.Collections.Generic.List[string]
 
             #Links are compared without "http://" or "https://": the Internet Archive often knows a file under
@@ -200,7 +230,7 @@ Function Invoke-PowerMeta{
             $archiveEntries = @()
             if ($SearchEngines -contains 'Archive')
                 {
-                $archiveEntries = @(Search-PowerMetaArchive -Domain $domain -FileTypes $filetypearray -UserAgent $UserAgent)
+                $archiveEntries = @(Search-JustOSINTArchive -Domain $domain -FileTypes $filetypearray -UserAgent $UserAgent)
                 }
 
             #The search engines are asked once per file type. DuckDuckGo is left alone for the rest of the
@@ -221,17 +251,17 @@ Function Invoke-PowerMeta{
 
                 if ($askBing)
                     {
-                    $found += @(Search-PowerMetaBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay)
+                    $found += @(Search-JustOSINTBing -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay)
                     }
 
                 if ($askDuckDuckGo)
                     {
-                    $found += @(Search-PowerMetaDuckDuckGo -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay -Blocked ([ref]$duckDuckGoBlocked))
+                    $found += @(Search-JustOSINTDuckDuckGo -Domain $domain -FileType $filetype -UserAgent $UserAgent -MaxPages $MaxSearchPages -DelaySeconds $SearchDelay -Blocked ([ref]$duckDuckGoBlocked))
                     }
 
                 foreach ($link in $found)
                     {
-                    $key = Get-PowerMetaLinkKey $link
+                    $key = Get-JustOSINTLinkKey $link
                     if (-not $linkByKey.ContainsKey($key))
                         {
                         $linkByKey[$key] = $link
@@ -244,7 +274,7 @@ Function Invoke-PowerMeta{
             #address is the one kept. Either way the Archive's copy is remembered for it.
             foreach ($entry in $archiveEntries)
                 {
-                $key = Get-PowerMetaLinkKey $entry.Link
+                $key = Get-JustOSINTLinkKey $entry.Link
                 if (-not $linkByKey.ContainsKey($key))
                     {
                     $linkByKey[$key] = $entry.Link
@@ -256,14 +286,17 @@ Function Invoke-PowerMeta{
 
             $targetlinks = @($validlinks | Sort-Object)
 
-            Write-Output ('[*] A total of ' + $targetlinks.Count + ' files were discovered.')
-            Write-Output "`n"
+            Write-Output ''
+            $marker = '[+]'
+            if ($targetlinks.Count -eq 0) { $marker = '[-]' }
+            Write-Output ($marker + ' A total of ' + $targetlinks.Count + " files were discovered on $domain.")
+            Write-Output ''
 
             #If an OutputList is specified write the results to disk
             If ($OutputList -ne "" -and $targetlinks.Count -gt 0)
                 {
-                Write-Output "[*] Writing links to a file at $OutputList"
                 $targetlinks | Out-File -LiteralPath $OutputList -Encoding ascii
+                Write-Output "[+] The links were written to $OutputList"
                 }
 
         }
@@ -276,13 +309,17 @@ Function Invoke-PowerMeta{
             return
             }
         $targetlinks = @(Get-Content -LiteralPath $TargetFileList | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne '' })
-        Write-Output "[*] Using the file list at $TargetFileList"
-        Write-Output ('[*] A total of ' + $targetlinks.Count + ' files were found.')
+        Write-Output "[*] Link list     : $TargetFileList"
+        Write-Output ('[*] File types    : ' + ($filetypearray -join ', '))
+        Write-Output ''
+        $marker = '[+]'
+        if ($targetlinks.Count -eq 0) { $marker = '[-]' }
+        Write-Output ($marker + ' A total of ' + $targetlinks.Count + ' files were found in the list.')
         }
 
     if ($targetlinks.Count -eq 0)
         {
-        Write-Output "[*] Nothing to download."
+        Write-Output "[-] Nothing to download."
         return
         }
 
@@ -354,7 +391,7 @@ Function Invoke-PowerMeta{
 }
 
 #Splits "pdf, docx,xlsx" into clean lower-case extensions
-function Get-PowerMetaFileTypeList {
+function Get-JustOSINTFileTypeList {
     param([string]$FileTypes)
 
     $types = @()
@@ -373,7 +410,7 @@ function Get-PowerMetaFileTypeList {
 }
 
 #Reduces "https://www.TargetDomain.com/path" or "*.targetdomain.com" to a bare host name
-function Get-PowerMetaHostName {
+function Get-JustOSINTHostName {
     param([string]$TargetDomain)
 
     $name = $TargetDomain.Trim().ToLowerInvariant()
@@ -387,7 +424,7 @@ function Get-PowerMetaHostName {
 
 #Fetches a page and returns its text, or nothing if the request failed.
 #With -Method Post the hashtable given as -Body is sent as form fields.
-function Get-PowerMetaWebPage {
+function Get-JustOSINTWebPage {
     param(
         [string]$Url,
         [string]$UserAgent = "",
@@ -418,7 +455,7 @@ function Get-PowerMetaWebPage {
 }
 
 #Returns the href of every link in a page, with HTML entities such as &amp; decoded
-function Get-PowerMetaLinksFromHtml {
+function Get-JustOSINTLinksFromHtml {
     param([string]$Html)
 
     $links = New-Object System.Collections.Generic.List[string]
@@ -437,7 +474,7 @@ function Get-PowerMetaLinksFromHtml {
 #Bing wraps each result as https://www.bing.com/ck/a?...&u=a1<base64url of the real address>&ntb=1
 #(two marker characters, then the address). This returns the real address, the link unchanged if it
 #is not wrapped, or nothing if it cannot be decoded into an http(s) address.
-function ConvertFrom-PowerMetaBingLink {
+function ConvertFrom-JustOSINTBingLink {
     param([string]$Link)
 
     if ($Link -notmatch '^(?:https?:)?//(?:www\.)?bing\.com/ck/a\?') { return $Link }
@@ -467,7 +504,7 @@ function ConvertFrom-PowerMetaBingLink {
 
 #DuckDuckGo gives results either as plain addresses or wrapped as //duckduckgo.com/l/?uddg=<url-encoded address>&rut=...
 #This returns the real address, the link unchanged if it is not wrapped, or nothing if it cannot be decoded.
-function ConvertFrom-PowerMetaDuckDuckGoLink {
+function ConvertFrom-JustOSINTDuckDuckGoLink {
     param([string]$Link)
 
     if ($Link -notmatch '^(?:https?:)?//(?:www\.)?duckduckgo\.com/l/\?') { return $Link }
@@ -489,7 +526,7 @@ function ConvertFrom-PowerMetaDuckDuckGoLink {
 
 #Returns the fields of the "Next" form on a DuckDuckGo results page as a hashtable, or nothing on the last page.
 #The form carries the query (q), the offset of the next page (s) and the tokens DuckDuckGo wants sent back.
-function Get-PowerMetaDuckDuckGoNextForm {
+function Get-JustOSINTDuckDuckGoNextForm {
     param([string]$Html, [int]$After = 0)
 
     $best = $null
@@ -525,7 +562,7 @@ function Get-PowerMetaDuckDuckGoNextForm {
 }
 
 #True if the link is an http(s) address on the domain (or one of its sub-domains)
-function Test-PowerMetaDomainLink {
+function Test-JustOSINTDomainLink {
     param([string]$Link, [string]$Domain)
 
     $uri = $null
@@ -539,10 +576,10 @@ function Test-PowerMetaDomainLink {
 
 #True if the link is on the domain and names a file of the wanted type.
 #".doc" must not be followed by another letter or digit, so a search for doc does not pick up docx.
-function Test-PowerMetaFileLink {
+function Test-JustOSINTFileLink {
     param([string]$Link, [string]$Domain, [string]$FileType)
 
-    if (-not (Test-PowerMetaDomainLink -Link $Link -Domain $Domain)) { return $false }
+    if (-not (Test-JustOSINTDomainLink -Link $Link -Domain $Domain)) { return $false }
 
     $uri = New-Object System.Uri($Link)
     $pattern = '\.' + [regex]::Escape($FileType) + '(?![A-Za-z0-9])'
@@ -550,7 +587,7 @@ function Test-PowerMetaFileLink {
 }
 
 #Searches Bing for "site:domain filetype:type" and returns the matching file links
-function Search-PowerMetaBing {
+function Search-JustOSINTBing {
     param(
         [string]$Domain,
         [string]$FileType,
@@ -573,18 +610,18 @@ function Search-PowerMetaBing {
         if ($page -gt 1 -and $DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
 
         Write-Host "[*] Now Analyzing page $page of Bing search results"
-        $html = Get-PowerMetaWebPage -Url "https://www.bing.com/search?q=$query&first=$first" -UserAgent $UserAgent -Session $session
+        $html = Get-JustOSINTWebPage -Url "https://www.bing.com/search?q=$query&first=$first" -UserAgent $UserAgent -Session $session
         if (-not $html) { break }
 
         #Each organic result sits in an element with class "b_algo"
         $results = ([regex]::Matches($html, 'class="b_algo[ "]')).Count
         $new = 0
-        foreach ($href in @(Get-PowerMetaLinksFromHtml $html))
+        foreach ($href in @(Get-JustOSINTLinksFromHtml $html))
             {
-            $link = ConvertFrom-PowerMetaBingLink $href
+            $link = ConvertFrom-JustOSINTBingLink $href
             if (-not $link) { continue }
-            if (Test-PowerMetaDomainLink -Link $link -Domain $Domain) { $onDomainSeen++ }
-            if (Test-PowerMetaFileLink -Link $link -Domain $Domain -FileType $FileType)
+            if (Test-JustOSINTDomainLink -Link $link -Domain $Domain) { $onDomainSeen++ }
+            if (Test-JustOSINTFileLink -Link $link -Domain $Domain -FileType $FileType)
                 {
                 if (-not $links.Contains($link))
                     {
@@ -607,7 +644,7 @@ function Search-PowerMetaBing {
         {
         Write-Host "[!] Bing returned results, but none of them are on $Domain. It does this when it has little or nothing on the site for a search, and sometimes for automated searches."
         }
-    Write-Host "[*] Bing: $($links.Count) $FileType files found"
+    Write-Host (Get-JustOSINTTally -Source 'Bing' -Count $links.Count -What "$FileType files")
 
     $links
 }
@@ -615,7 +652,7 @@ function Search-PowerMetaBing {
 #Searches DuckDuckGo's script-free page (html.duckduckgo.com) for "site:domain filetype:type" and returns the matching file links.
 #DuckDuckGo wants the query as a form post, and gives each results page a "Next" form holding what to post for the following page.
 #If it answers with its bot check instead of results, the [ref] passed as -Blocked is set to $true.
-function Search-PowerMetaDuckDuckGo {
+function Search-JustOSINTDuckDuckGo {
     param(
         [string]$Domain,
         [string]$FileType,
@@ -640,7 +677,7 @@ function Search-PowerMetaDuckDuckGo {
         if ($page -gt 1 -and $DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
 
         Write-Host "[*] Now Analyzing page $page of DuckDuckGo search results"
-        $html = Get-PowerMetaWebPage -Url 'https://html.duckduckgo.com/html/' -Method 'Post' -Body $body -UserAgent $UserAgent -Session $session
+        $html = Get-JustOSINTWebPage -Url 'https://html.duckduckgo.com/html/' -Method 'Post' -Body $body -UserAgent $UserAgent -Session $session
         if (-not $html)
             {
             #No answer to the first request (an error status or a network failure): leave DuckDuckGo alone for the rest of the run
@@ -664,12 +701,12 @@ function Search-PowerMetaDuckDuckGo {
             }
 
         $new = 0
-        foreach ($href in @(Get-PowerMetaLinksFromHtml $html))
+        foreach ($href in @(Get-JustOSINTLinksFromHtml $html))
             {
-            $link = ConvertFrom-PowerMetaDuckDuckGoLink $href
+            $link = ConvertFrom-JustOSINTDuckDuckGoLink $href
             if (-not $link) { continue }
-            if (Test-PowerMetaDomainLink -Link $link -Domain $Domain) { $onDomainSeen++ }
-            if (Test-PowerMetaFileLink -Link $link -Domain $Domain -FileType $FileType)
+            if (Test-JustOSINTDomainLink -Link $link -Domain $Domain) { $onDomainSeen++ }
+            if (Test-JustOSINTFileLink -Link $link -Domain $Domain -FileType $FileType)
                 {
                 if (-not $links.Contains($link))
                     {
@@ -684,7 +721,7 @@ function Search-PowerMetaDuckDuckGo {
         #Nothing new: this was the last page
         if ($new -eq 0) { break }
 
-        $next = Get-PowerMetaDuckDuckGoNextForm -Html $html -After $offset
+        $next = Get-JustOSINTDuckDuckGoNextForm -Html $html -After $offset
         if ($null -ne $next)
             {
             $body = $next
@@ -706,14 +743,14 @@ function Search-PowerMetaDuckDuckGo {
         {
         Write-Host "[!] DuckDuckGo returned results, but none of them are on $Domain."
         }
-    Write-Host "[*] DuckDuckGo: $($links.Count) $FileType files found"
+    Write-Host (Get-JustOSINTTally -Source 'DuckDuckGo' -Count $links.Count -What "$FileType files")
 
     $links
 }
 
 #The part of a link that identifies the file: host (and port, when it is not the usual one), path and query.
 #"http://" or "https://" is left out, so the two addresses of one file compare as equal.
-function Get-PowerMetaLinkKey {
+function Get-JustOSINTLinkKey {
     param([string]$Link)
 
     $uri = $null
@@ -726,7 +763,7 @@ function Get-PowerMetaLinkKey {
 
 #Reads the answer of the Internet Archive's index: one "address timestamp" pair per line.
 #Returns one object per file on the domain, with Link (the address on the site) and ArchiveCopy (the Archive's copy of it).
-function ConvertFrom-PowerMetaArchiveIndex {
+function ConvertFrom-JustOSINTArchiveIndex {
     param([string]$Text, [string]$Domain, [string[]]$FileTypes)
 
     $entries = New-Object System.Collections.Generic.List[object]
@@ -749,7 +786,7 @@ function ConvertFrom-PowerMetaArchiveIndex {
         $wanted = $false
         foreach ($type in $FileTypes)
             {
-            if (Test-PowerMetaFileLink -Link $link -Domain $Domain -FileType $type)
+            if (Test-JustOSINTFileLink -Link $link -Domain $Domain -FileType $type)
                 {
                 $wanted = $true
                 break
@@ -769,7 +806,7 @@ function ConvertFrom-PowerMetaArchiveIndex {
 #sub-domains that name a file of a wanted type (at most -MaxResults of them). The index is a service made to
 #be queried by programs, and one request covers all file types. Files it lists may have been removed from
 #the site since.
-function Search-PowerMetaArchive {
+function Search-JustOSINTArchive {
     param(
         [string]$Domain,
         [string[]]$FileTypes,
@@ -788,15 +825,15 @@ function Search-PowerMetaArchive {
         '&matchType=domain&fl=original,timestamp&collapse=urlkey&gzip=false&filter=statuscode:200&filter=' +
         [System.Uri]::EscapeDataString($filter) + '&limit=' + $MaxResults
 
-    $text = Get-PowerMetaWebPage -Url $url -UserAgent $UserAgent -TimeoutSec 180
+    $text = Get-JustOSINTWebPage -Url $url -UserAgent $UserAgent -TimeoutSec 180
     if ($null -eq $text)
         {
         Write-Host "[!] The Internet Archive did not answer. Its index is sometimes slow or busy; try again later."
         return
         }
 
-    $entries = @(ConvertFrom-PowerMetaArchiveIndex -Text $text -Domain $Domain -FileTypes $FileTypes)
-    Write-Host "[*] Internet Archive: $($entries.Count) files found"
+    $entries = @(ConvertFrom-JustOSINTArchiveIndex -Text $text -Domain $Domain -FileTypes $FileTypes)
+    Write-Host (Get-JustOSINTTally -Source 'Internet Archive' -Count $entries.Count)
 
     #The index stops at the limit without saying so
     $lineCount = @($text -split "`n" | Where-Object { $_.Trim() -ne '' }).Count
@@ -812,7 +849,7 @@ function Search-PowerMetaArchive {
 #A name with an ending always ends in one of the wanted file types. The site must not be able to choose
 #another one: a download saved as setup.exe or run.bat could be started by mistake. So
 #get.php?file=report.pdf is saved as get.php.pdf, and a link that names no wanted type gets ".download" added.
-function Get-PowerMetaFileName {
+function Get-JustOSINTFileName {
     param([string]$Link, [string[]]$FileTypes = @())
 
     if ($null -eq $FileTypes -or $FileTypes.Count -eq 0) { $FileTypes = @('pdf', 'docx', 'xlsx', 'doc', 'xls', 'pptx', 'ppt') }
@@ -875,7 +912,7 @@ function Get-PowerMetaFileName {
 }
 
 #Downloads one address to a file. Returns an empty string when it worked, otherwise the reason it failed.
-function Save-PowerMetaFile {
+function Save-JustOSINTFile {
     param(
         [string]$Link,
         [string]$Destination,
@@ -890,7 +927,7 @@ function Save-PowerMetaFile {
     #path would make every download fail. Such files are fetched to a temporary name and then moved.
     $target = $Destination
     $viaTemp = [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($Destination)
-    if ($viaTemp) { $target = Join-Path ([System.IO.Path]::GetTempPath()) ('powermeta-' + [System.Guid]::NewGuid().ToString('N') + '.tmp') }
+    if ($viaTemp) { $target = Join-Path ([System.IO.Path]::GetTempPath()) ('justosint-' + [System.Guid]::NewGuid().ToString('N') + '.tmp') }
 
     $request = @{ Uri = $Link; UseBasicParsing = $true; OutFile = $target; TimeoutSec = 300; ErrorAction = 'Stop' }
     if ($UserAgent -ne "") { $request['UserAgent'] = $UserAgent }
@@ -978,12 +1015,12 @@ Function Get-TargetFiles{
             {
             try
                 {
-                if (-not ('PowerMetaTrustAllCertificates' -as [type]))
+                if (-not ('JustOSINTTrustAllCertificates' -as [type]))
                     {
                     Add-Type -TypeDefinition @'
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
-public static class PowerMetaTrustAllCertificates {
+public static class JustOSINTTrustAllCertificates {
     private static bool Accept(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors) {
         return true;
     }
@@ -992,7 +1029,7 @@ public static class PowerMetaTrustAllCertificates {
 '@
                     }
                 $previousCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
-                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [PowerMetaTrustAllCertificates]::Callback
+                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [JustOSINTTrustAllCertificates]::Callback
                 $restoreCallback = $true
                 }
             catch
@@ -1016,7 +1053,7 @@ public static class PowerMetaTrustAllCertificates {
                     }
 
                 #When downloading files if a file has the same name a number is added to it
-                $filename = Get-PowerMetaFileName -Link $link -FileTypes $FileTypes
+                $filename = Get-JustOSINTFileName -Link $link -FileTypes $FileTypes
                 $candidate = $filename
                 $number = 1
                 while (Test-Path -LiteralPath (Join-Path $OutputPath $candidate))
@@ -1026,8 +1063,8 @@ public static class PowerMetaTrustAllCertificates {
                     }
                 $destination = Join-Path $OutputPath $candidate
 
-                Write-Output "Now Downloading $link"
-                $problem = [string](Save-PowerMetaFile -Link $link -Destination $destination -UserAgent $UserAgent -SkipCertificateCheck $isCore)
+                Write-Output "[*] Now Downloading $link"
+                $problem = [string](Save-JustOSINTFile -Link $link -Destination $destination -UserAgent $UserAgent -SkipCertificateCheck $isCore)
 
                 #A file that is gone from the site may still be in the Internet Archive
                 if ($problem -ne '' -and $null -ne $ArchiveCopies -and $ArchiveCopies.Contains($link))
@@ -1039,11 +1076,11 @@ public static class PowerMetaTrustAllCertificates {
                     if ($restoreCallback) { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCallback }
                     try
                         {
-                        $problem = [string](Save-PowerMetaFile -Link ([string]$ArchiveCopies[$link]) -Destination $destination -UserAgent $UserAgent -SkipCertificateCheck $false)
+                        $problem = [string](Save-JustOSINTFile -Link ([string]$ArchiveCopies[$link]) -Destination $destination -UserAgent $UserAgent -SkipCertificateCheck $false)
                         }
                     finally
                         {
-                        if ($restoreCallback) { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [PowerMetaTrustAllCertificates]::Callback }
+                        if ($restoreCallback) { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = [JustOSINTTrustAllCertificates]::Callback }
                         }
                     }
 
@@ -1063,12 +1100,14 @@ public static class PowerMetaTrustAllCertificates {
             if ($restoreCallback) { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCallback }
             }
 
-        Write-Output "[*] Downloaded $downloaded files to $OutputPath ($failed failed)."
+        $marker = '[+]'
+        if ($downloaded -eq 0) { $marker = '[-]' }
+        Write-Output "$marker Downloaded $downloaded files to $OutputPath ($failed failed)."
 }
 
 #Finds exiftool next to this script or on the PATH. The current directory is deliberately not searched:
 #it may be a folder of files that were downloaded from the target.
-function Get-PowerMetaExifTool {
+function Get-JustOSINTExifTool {
     if ($env:OS -eq 'Windows_NT') { $name = 'exiftool.exe' } else { $name = 'exiftool' }
 
     if ($PSScriptRoot)
@@ -1083,8 +1122,8 @@ function Get-PowerMetaExifTool {
 }
 
 #ExifTool before 12.24 can be made to run code by a crafted file (CVE-2021-22204),
-#and PowerMeta runs it on files downloaded from the target. Returns $true if the copy is safe to use.
-function Test-PowerMetaExifTool {
+#and justOSINT runs it on files downloaded from the target. Returns $true if the copy is safe to use.
+function Test-JustOSINTExifTool {
     param([string]$ExifToolPath)
 
     $reported = ''
@@ -1108,7 +1147,7 @@ function Test-PowerMetaExifTool {
 
 #Runs exiftool on every file in a folder and returns its output lines.
 #ExifTool writes UTF-8, so the console encoding is switched while it runs.
-function Invoke-PowerMetaExifTool {
+function Invoke-JustOSINTExifTool {
     param([string]$ExifToolPath, [string[]]$Options, [string]$Folder)
 
     $previousEncoding = $null
@@ -1143,7 +1182,7 @@ function Invoke-PowerMetaExifTool {
 #as -5 or +0.3 are left as they are. The same is done inside a cell, after a semicolon, a tab or a line
 #break: some spreadsheet programs start a new cell there.
 #Takes the whole CSV text (lines joined with a line feed) and returns it.
-function ConvertTo-PowerMetaInertCsv {
+function ConvertTo-JustOSINTInertCsv {
     param([string]$Text)
 
     #One cell and what ends it: a quoted cell (quotes inside it are doubled) or a plain one, then a comma,
@@ -1183,13 +1222,13 @@ Function ExtractMetadata{
             return
             }
 
-        $exiftool = Get-PowerMetaExifTool
+        $exiftool = Get-JustOSINTExifTool
         if (-not $exiftool)
             {
-            Write-Output "[*] ExifTool was not found next to PowerMeta.ps1 or on the PATH. Run Install-ExifTool to download the current release, then run: ExtractMetadata -OutputDir `"$OutputDir`""
+            Write-Output "[*] ExifTool was not found next to justOSINT.ps1 or on the PATH. Run Install-ExifTool to download the current release, then run: ExtractMetadata -OutputDir `"$OutputDir`""
             return
             }
-        if (-not (Test-PowerMetaExifTool $exiftool))
+        if (-not (Test-JustOSINTExifTool $exiftool))
             {
             return
             }
@@ -1202,16 +1241,16 @@ Function ExtractMetadata{
         if ($ExtractAllToCsv -ne "")
             {
             Write-Output "[*] Now extracting metadata from $OutputDir"
-            $csv = @(Invoke-PowerMetaExifTool -ExifToolPath $exiftool -Options @('-csv', '-q', '-q') -Folder $OutputPath)
+            $csv = @(Invoke-JustOSINTExifTool -ExifToolPath $exiftool -Options @('-csv', '-q', '-q') -Folder $OutputPath)
             if ($csv.Count -lt 2)
                 {
-                Write-Output "[*] ExifTool found no metadata in $OutputDir."
+                Write-Output "[-] ExifTool found no metadata in $OutputDir."
                 return
                 }
             try
                 {
                 #Cells that a spreadsheet program would run as a formula are made plain text
-                $csv = @((ConvertTo-PowerMetaInertCsv -Text ($csv -join "`n")) -split "`n")
+                $csv = @((ConvertTo-JustOSINTInertCsv -Text ($csv -join "`n")) -split "`n")
 
                 #A value can span lines, so the rows are counted: a line ends a row when its quotes are closed
                 $rows = 0
@@ -1227,7 +1266,7 @@ Function ExtractMetadata{
                 $csvEncoding = 'UTF8'
                 if ($PSVersionTable.PSVersion.Major -ge 6) { $csvEncoding = 'utf8BOM' }
                 Set-Content -LiteralPath $ExtractAllToCsv -Value $csv -Encoding $csvEncoding -ErrorAction Stop
-                Write-Output ('[*] Metadata for ' + ($rows - 1) + " files was written to $ExtractAllToCsv")
+                Write-Output ('[+] Metadata for ' + ($rows - 1) + " files was written to $ExtractAllToCsv")
                 }
             catch
                 {
@@ -1238,7 +1277,7 @@ Function ExtractMetadata{
 
         #If we are not extracting all Metadata just get the Author and Creator for possible usernames.
         Write-Output "[*] Now extracting metadata from $OutputDir"
-        $json = (@(Invoke-PowerMetaExifTool -ExifToolPath $exiftool -Options @('-j', '-q', '-q', '-Author', '-Creator') -Folder $OutputPath) -join "`n").Trim()
+        $json = (@(Invoke-JustOSINTExifTool -ExifToolPath $exiftool -Options @('-j', '-q', '-q', '-Author', '-Creator') -Folder $OutputPath) -join "`n").Trim()
 
         $records = @()
         if ($json -ne '')
@@ -1273,20 +1312,22 @@ Function ExtractMetadata{
         $uniquemeta = @($allmeta | Sort-Object -Unique)
 
         Write-Output ('[*] ExifTool read ' + $records.Count + ' files.')
-        Write-Output "`n[*] Extracted 'Author' and 'Creator' metadata"
+        Write-Output ''
         if ($uniquemeta.Count -eq 0)
             {
-            Write-Output "[*] No 'Author' or 'Creator' metadata was found."
+            Write-Output "[-] No 'Author' or 'Creator' metadata was found."
             }
         else
             {
-            $uniquemeta
+            Write-Output ("[+] Extracted 'Author' and 'Creator' metadata (" + $uniquemeta.Count + ' values)')
+            Write-Output ''
+            foreach ($value in $uniquemeta) { Write-Output ('    ' + $value) }
             }
-        Write-Output "`n"
+        Write-Output ''
 }
 
 #SHA-256 of a file as lower-case hex
-function Get-PowerMetaSha256 {
+function Get-JustOSINTSha256 {
     param([string]$Path)
 
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -1308,10 +1349,10 @@ Function Install-ExifTool{
 
     <#
     .SYNOPSIS
-    Downloads the current official ExifTool package for Windows, checks it against the SHA-256 checksum published on exiftool.org, and unpacks exiftool.exe and its exiftool_files folder next to PowerMeta.ps1.
+    Downloads the current official ExifTool package for Windows, checks it against the SHA-256 checksum published on exiftool.org, and unpacks exiftool.exe and its exiftool_files folder next to justOSINT.ps1.
 
     .PARAMETER Destination
-    The folder to install into. Defaults to the folder PowerMeta.ps1 is in.
+    The folder to install into. Defaults to the folder justOSINT.ps1 is in.
 
     .Example
 
@@ -1343,12 +1384,12 @@ Function Install-ExifTool{
 
         $ProgressPreference = 'SilentlyContinue'
         #A plain agent name: the download mirror answers browser-like agents with a web page instead of the file
-        $agent = 'PowerMeta'
-        $work = Join-Path ([System.IO.Path]::GetTempPath()) ('powermeta-exiftool-' + [System.Guid]::NewGuid().ToString('N'))
+        $agent = 'justOSINT'
+        $work = Join-Path ([System.IO.Path]::GetTempPath()) ('justosint-exiftool-' + [System.Guid]::NewGuid().ToString('N'))
 
         try
             {
-            $version = ("" + (Get-PowerMetaWebPage -Url 'https://exiftool.org/ver.txt' -UserAgent $agent)).Trim()
+            $version = ("" + (Get-JustOSINTWebPage -Url 'https://exiftool.org/ver.txt' -UserAgent $agent)).Trim()
             if ($version -notmatch '^\d+\.\d+$')
                 {
                 Write-Output "[!] Could not read the current ExifTool version from https://exiftool.org/ver.txt. Nothing was installed."
@@ -1359,7 +1400,7 @@ Function Install-ExifTool{
             $package = "exiftool-${version}_$bits"
             $zipName = "$package.zip"
 
-            $checksums = "" + (Get-PowerMetaWebPage -Url 'https://exiftool.org/checksums.txt' -UserAgent $agent)
+            $checksums = "" + (Get-JustOSINTWebPage -Url 'https://exiftool.org/checksums.txt' -UserAgent $agent)
             $match = [regex]::Match($checksums, 'SHA2-256\(' + [regex]::Escape($zipName) + '\)\s*=\s*([0-9a-fA-F]{64})')
             if (-not $match.Success)
                 {
@@ -1373,13 +1414,13 @@ Function Install-ExifTool{
             Write-Output "[*] Downloading ExifTool $version ($zipName)"
             Invoke-WebRequest -Uri "https://sourceforge.net/projects/exiftool/files/$zipName/download" -UserAgent $agent -UseBasicParsing -OutFile $zipPath -TimeoutSec 600 -ErrorAction Stop
 
-            $actual = Get-PowerMetaSha256 $zipPath
+            $actual = Get-JustOSINTSha256 $zipPath
             if ($actual -ne $expected)
                 {
                 Write-Output "[!] The download does not match the checksum published on exiftool.org (expected $expected, got $actual). Nothing was installed."
                 return
                 }
-            Write-Output "[*] Checksum verified."
+            Write-Output "[+] Checksum verified."
 
             $unpacked = Join-Path $work 'unpacked'
             try { Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop } catch { }
@@ -1403,7 +1444,7 @@ Function Install-ExifTool{
             Copy-Item -LiteralPath $files -Destination $targetFiles -Recurse -Force -ErrorAction Stop
             Copy-Item -LiteralPath $launcher -Destination (Join-Path $Destination 'exiftool.exe') -Force -ErrorAction Stop
 
-            Write-Output "[*] ExifTool $version was installed to $Destination"
+            Write-Output "[+] ExifTool $version was installed to $Destination"
             }
         catch
             {

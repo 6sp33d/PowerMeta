@@ -11,8 +11,8 @@ import time
 import unittest
 import http.server
 
-from powermeta import cli, exif, links, sources, web
-from powermeta.web import FetchError, download
+from justosint import cli, exif, links, sources, web
+from justosint.web import FetchError, download
 
 from .support import LocalServer, RawServer, bing_page, patched, raw_answer, write_pdf
 
@@ -39,7 +39,7 @@ def run_cli(arguments):
 
 class TemporaryFolder(unittest.TestCase):
     def setUp(self):
-        self.folder = tempfile.mkdtemp(prefix="powermeta-test-")
+        self.folder = tempfile.mkdtemp(prefix="justosint-test-")
         self.addCleanup(shutil.rmtree, self.folder, ignore_errors=True)
 
 
@@ -65,7 +65,8 @@ class Downloads(TemporaryFolder):
             counts, output = self.run_downloads([server.url + "/files/report.pdf", server.url + "/other/report.pdf", "  ", ""])
         self.assertEqual(counts, (2, 0))
         self.assertEqual(sorted(os.listdir(self.folder)), ["report-1.pdf", "report.pdf"])
-        self.assertIn("[*] Downloading 2 files now.", output)
+        self.assertIn("[*] Downloading 2 files to %s" % self.folder, output)
+        self.assertIn("[+] Downloaded 2 files to %s (0 failed)." % self.folder, output)
 
     def test_a_missing_file_is_counted_and_leaves_nothing_behind(self):
         with LocalServer(self.site) as server:
@@ -436,7 +437,7 @@ class CsvCells(unittest.TestCase):
     def test_the_whole_file_is_rewritten_also_with_line_breaks_and_nul_characters(self):
         import csv
 
-        folder = tempfile.mkdtemp(prefix="powermeta-test-")
+        folder = tempfile.mkdtemp(prefix="justosint-test-")
         self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
         fake = os.path.join(folder, "fake-exiftool")
         with open(fake, "w") as target:
@@ -502,10 +503,11 @@ class CommandLine(TemporaryFolder):
             ["-d", "127.0.0.1", "-t", "pdf, docx", "--delay", "0", "--download", "--extract", "-o", out, "--list-out", listed]
         )
         self.assertEqual(code, 0, output)
-        self.assertIn("[*] Internet Archive: 2 files found", output)
-        self.assertIn("[*] Bing: 2 pdf files found", output)
+        self.assertIn("[+] Internet Archive: 2 files found", output)
+        self.assertIn("[+] Bing: 2 pdf files found", output)
+        self.assertIn("[-] Bing: no docx files found", output)
         self.assertIn("It is skipped for the rest of this run", output)
-        self.assertIn("[*] A total of 3 files were discovered.", output)
+        self.assertIn("[+] A total of 3 files were discovered on 127.0.0.1.", output)
         # DuckDuckGo refused once and was not asked again for the second file type
         self.assertEqual(sum(1 for request in server.requests if request.path == "/ddg"), 1)
         # Bing: once for the site alone, two pages for pdf, one for docx
@@ -513,19 +515,20 @@ class CommandLine(TemporaryFolder):
         self.assertEqual(sum(1 for request in server.requests if request.path == "/cdx"), 1)
         self.assertEqual(sorted(os.listdir(out)), ["gone.pdf", "report.pdf", "second.pdf"])
         self.assertIn("Trying the copy in the Internet Archive", output)
-        self.assertIn("[*] Downloaded 3 files", output)
+        self.assertIn("[+] Downloaded 3 files", output)
         with open(listed, encoding="ascii") as saved:
             self.assertEqual(len(saved.read().split()), 3)
         if EXIFTOOL:
+            self.assertIn("[+] Extracted 'Author' and 'Creator' metadata (5 values)", output)
             for author in ("adoe", "former.employee", "jsmith", "Old Writer", "Writer"):
-                self.assertIn("\n" + author + "\n", output)
+                self.assertIn("\n    " + author + "\n", output)
 
     def test_without_a_terminal_nothing_is_downloaded_unless_asked(self):
         out = os.path.join(self.folder, "out")
         with patched(cli.sys, stdin=io.StringIO("")):
             code, output, _ = self.run_with_server(["-d", "http://127.0.0.1/", "-t", "pdf", "--sources", "archive", "-o", out])
         self.assertEqual(code, 0, output)
-        self.assertIn("[*] A total of 2 files were discovered.", output)
+        self.assertIn("[+] A total of 2 files were discovered on 127.0.0.1.", output)
         self.assertIn("No files will be downloaded", output)
         self.assertFalse(os.path.exists(out))
 
@@ -539,18 +542,19 @@ class CommandLine(TemporaryFolder):
             code, output = run_cli(["-d", "127.0.0.1", "--list-in", listed, "--download", "-o", out])
             paths = [request.path for request in server.requests]
         self.assertEqual(code, 0, output)
-        self.assertIn("[*] A total of 2 files were found.", output)
+        self.assertIn("[+] A total of 2 files were found in the list.", output)
         self.assertEqual(paths, ["/files/report.pdf", "/gone.pdf"])
-        self.assertIn("[*] Downloaded 1 files", output)
+        self.assertIn("[+] Downloaded 1 files", output)
 
     def test_engines_searched_in_the_browser_are_not_also_asked_with_plain_requests(self):
-        from powermeta import browser
+        from justosint import browser
 
         calls, options = [], {}
 
         def fake_search(engines, domain, file_types, max_pages, delay, browser_name, log, on_link=None, **more):
             calls.append((list(engines), domain, list(file_types), browser_name))
             options.update(more)
+            more["tallies"].append(("Google (browser)", 2))
             # The browser finds today's https address of a file the Archive lists under http
             return ["https://127.0.0.1:%d/files/report.pdf" % self.server.port, "http://127.0.0.1:%d/files/browser-only.pdf" % self.server.port]
 
@@ -558,13 +562,22 @@ class CommandLine(TemporaryFolder):
             code, output, server = self.run_with_server(
                 [
                     "-d", "127.0.0.1", "-t", "pdf", "--delay", "0", "--browser", "google,bing", "--browser-name", "edge",
-                    "--list-out", os.path.join(self.folder, "l.txt"), "--google-lookup", "request", "--save-pages", os.path.join(self.folder, "pages"),
+                    "--list-out", os.path.join(self.folder, "l.txt"), "--google-lookup", "request",
                 ]
             )
         self.assertEqual(code, 0, output)
         self.assertEqual(calls, [(["google", "bing"], "127.0.0.1", ["pdf"], "edge")])
-        self.assertEqual(
-            options, {"ask": cli.ask_person, "lookup": "request", "user_agent": None, "save_pages": os.path.join(self.folder, "pages")}
+        self.assertEqual(options, {"ask": cli.ask_person, "lookup": "request", "user_agent": None, "tallies": [("Google (browser)", 2)]})
+        # The settings and the table of sources name the browser search
+        self.assertIn("[*] Browser       : Google, Bing (edge)", output)
+        self.assertIn("[*] Sources       : Internet Archive, DuckDuckGo", output)
+        self.assertIn(
+            "[*] Files found, by source\n"
+            "    Internet Archive         2\n"
+            "    DuckDuckGo        left out\n"
+            "    Google (browser)         2\n"
+            "[+] A total of 3 files were discovered on 127.0.0.1.\n",
+            output,
         )
         paths = [request.path for request in server.requests]
         # Bing went through the browser, so only DuckDuckGo and the Archive were asked with plain requests
@@ -594,7 +607,7 @@ class CommandLine(TemporaryFolder):
         self.assertIn("with pages of other sites (0 of its 2 results are on the site)", output)
         self.assertEqual(sum(1 for request in server.requests if request.path == "/bing"), 1)
         # The Internet Archive's files are still there, and nothing of another site was kept
-        self.assertIn("[*] A total of 2 files were discovered.", output)
+        self.assertIn("[+] A total of 2 files were discovered on 127.0.0.1.", output)
 
     def test_an_output_folder_that_cannot_be_used_is_noticed_before_the_search(self):
         a_file = os.path.join(self.folder, "a file")
@@ -618,7 +631,7 @@ class CommandLine(TemporaryFolder):
             code, output, server = self.run_with_server(["-d", "127.0.0.1", "-t", "pdf", "--sources", "archive", "--download"])
         self.assertEqual(code, 1, output)
         self.assertIn("The links that were found", output)
-        self.assertIn("\n%s/gone.pdf\n" % server.url, output)
+        self.assertIn("\n    %s/gone.pdf\n" % server.url, output)
 
     @unittest.skipIf(os.name == "nt", "uses a shell script as a stand-in for ExifTool")
     def test_a_metadata_value_is_printed_on_one_line(self):
@@ -662,7 +675,7 @@ class CommandLine(TemporaryFolder):
                 # No domain is needed when the links come from a list
                 code, output = run_cli(["--list-in", listed, "--download", "-o", out + str(number)])
                 self.assertEqual(code, 0, output)
-                self.assertIn("[*] Downloaded 2 files", output, encoding)
+                self.assertIn("[+] Downloaded 2 files", output, encoding)
                 self.assertEqual(sorted(os.listdir(out + str(number))), ["report.pdf", "second.pdf"])
 
     def test_a_link_list_that_cannot_be_written_is_noticed_before_the_search(self):
@@ -684,7 +697,7 @@ class CommandLine(TemporaryFolder):
             )
         self.assertEqual(code, 0, output)
         self.assertIn("They are listed here instead:", output)
-        self.assertIn("\n%s/files/report.pdf\n" % server.url, output)
+        self.assertIn("\n    %s/files/report.pdf\n" % server.url, output)
 
     def test_the_exit_code_says_when_nothing_could_be_downloaded_or_extracted(self):
         out = os.path.join(self.folder, "out")
@@ -703,7 +716,7 @@ class CommandLine(TemporaryFolder):
             with patched(exif, find_exiftool=lambda: None):
                 code, output = run_cli(["--list-in", listed, "--download", "--extract", "-o", out + "2"])
             self.assertEqual(code, 1, output)
-            self.assertIn("[*] Downloaded 1 files", output)
+            self.assertIn("[+] Downloaded 1 files", output)
             self.assertIn("ExifTool was not found", output)
 
     def test_ctrl_c_during_the_search_keeps_what_was_found_and_downloads_nothing(self):
@@ -718,7 +731,7 @@ class CommandLine(TemporaryFolder):
             )
         self.assertEqual(code, 130, output)
         self.assertIn("Interrupted: the search stops here", output)
-        self.assertIn("[*] A total of 2 files were discovered.", output)
+        self.assertIn("[+] A total of 2 files were discovered on 127.0.0.1.", output)
         self.assertFalse(os.path.exists(out))
         with open(listed) as saved:
             self.assertEqual(saved.read().split(), [server.url + "/files/report.pdf", server.url + "/gone.pdf"])
@@ -727,7 +740,7 @@ class CommandLine(TemporaryFolder):
         with patched(sources, search_bing=interrupted):
             code, output, server = self.run_with_server(["-d", "127.0.0.1", "-t", "pdf", "--delay", "0", "--download", "-o", out])
         self.assertEqual(code, 130, output)
-        self.assertIn("\n%s/gone.pdf\n" % server.url, output)
+        self.assertIn("\n    %s/gone.pdf\n" % server.url, output)
         self.assertFalse(os.path.exists(out))
 
     def test_ctrl_c_during_the_downloads_ends_the_run_without_a_traceback(self):
@@ -752,7 +765,7 @@ class CommandLine(TemporaryFolder):
         self.assertEqual(agents["web"], {web.PROGRAM_USER_AGENT})  # the Archive's copy of a file that is gone
         self.assertEqual(agents["bing"], {web.DEFAULT_USER_AGENT})
         self.assertEqual(agents["files"], {web.DEFAULT_USER_AGENT})
-        self.assertRegex(web.PROGRAM_USER_AGENT, r"^PowerMeta/\d")
+        self.assertRegex(web.PROGRAM_USER_AGENT, r"^justOSINT/\d")
 
         # A User-Agent that was asked for is used everywhere
         code, output, server = self.run_with_server(

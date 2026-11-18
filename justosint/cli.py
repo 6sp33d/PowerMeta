@@ -10,11 +10,12 @@ import subprocess
 import sys
 import time
 
-from . import __version__, exif, links, sources
+from . import BANNER, NAME, __version__, exif, links, sources
 from .web import DEFAULT_USER_AGENT, PROGRAM_USER_AGENT, FetchError, Fetcher, SaveError, download
 
 SOURCES = ("archive", "bing", "duckduckgo")
 BROWSER_ENGINES = ("google", "bing", "duckduckgo")
+SOURCE_NAMES = {"archive": "Internet Archive", "bing": "Bing", "duckduckgo": "DuckDuckGo", "google": "Google"}
 
 # Control characters, and the characters that reverse the direction of text
 _UNPRINTABLE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f‪-‮⁦-⁩]")
@@ -26,14 +27,34 @@ def log(message=""):
     print(_UNPRINTABLE.sub("?", str(message)), flush=True)
 
 
+def log_settings(rows):
+    """Lines of the form "[*] Target domain : example.com", with the colons under each other."""
+    width = max(len(name) for name, _ in rows)
+    for name, value in rows:
+        log("[*] %-*s : %s" % (width, name, value))
+
+
+def log_table(title, rows, numbers=False):
+    """A title, and under it one indented line per row with the values in a column of their own.
+    numbers=True puts the values against the right edge of their column, as in a table of counts."""
+    log(title)
+    names = max(len(str(name)) for name, _ in rows)
+    values = max(len(str(value)) for _, value in rows)
+    for name, value in rows:
+        if numbers:
+            log("    %-*s  %*s" % (names, name, values, value))
+        else:
+            log("    %-*s : %s" % (names, name, value))
+
+
 def ask_yes_no(question):
     """Ask a yes/no question. Without a terminal nothing can be asked, and the answer is no."""
     if sys.stdin is None or not sys.stdin.isatty():
-        log("[*] %s Not asked, because there is no terminal: answered no." % question)
+        log("[?] %s Not asked, because there is no terminal: answered no." % question)
         return False
     while True:
         try:
-            answer = input(question + " [Y/n] ").strip().lower()
+            answer = input("[?] " + question + " [Y/n] ").strip().lower()
         except EOFError:
             return False
         if answer in ("", "y", "yes"):
@@ -65,11 +86,12 @@ def _name_list(text, allowed, option, parser):
 
 
 def find_files(domain, file_types, http_sources, browser_engines, user_agent=None, max_pages=5, delay=2,
-               browser_name="chrome", google_lookup="click", save_pages=None):
+               browser_name="chrome", google_lookup="click"):
     """Ask every chosen source.
 
-    Returns (sorted links, {link: address of the Internet Archive's copy}, interrupted). interrupted is
-    True if Ctrl+C ended the search early; what had been found by then is still returned.
+    Returns (sorted links, {link: address of the Internet Archive's copy}, interrupted, tallies).
+    interrupted is True if Ctrl+C ended the search early; what had been found by then is still returned.
+    tallies says for each source what it gave: a list of (name, number of files or a remark).
     """
     found, by_key, archive_copies = [], {}, {}
 
@@ -83,15 +105,19 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
         return by_key[key]
 
     archive_entries = []
+    from_bing, from_duckduckgo = set(), set()
+    left_out = set()
+    browser_tallies = []
     interrupted = False
+    # An engine that is searched through the browser is not also asked with plain requests
+    engines = [name for name in ("bing", "duckduckgo") if name in http_sources and name not in browser_engines]
+    asked = list(engines)
     try:
         # The Internet Archive answers for all file types in a single request. Its index is a service
-        # for programs, so it is told that this is PowerMeta unless another User-Agent was asked for.
+        # for programs, so it is told who is asking unless another User-Agent was asked for.
         if "archive" in http_sources:
             archive_entries = sources.search_archive(Fetcher(user_agent or PROGRAM_USER_AGENT), domain, file_types, log=log)
 
-        # An engine that is searched through the browser is not also asked with plain requests
-        engines = [name for name in ("bing", "duckduckgo") if name in http_sources and name not in browser_engines]
         # One session per search engine, so that the cookies it sets are sent back as a browser would
         bing = Fetcher(user_agent or DEFAULT_USER_AGENT)
         duckduckgo = Fetcher(user_agent or DEFAULT_USER_AGENT)
@@ -102,6 +128,7 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
             first = False
             if not sources.bing_knows_site(bing, domain, log):
                 engines.remove("bing")
+                left_out.add("bing")
         for file_type in file_types:
             ask_bing = "bing" in engines
             ask_duckduckgo = "duckduckgo" in engines and not duckduckgo_blocked
@@ -114,12 +141,14 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
 
             if ask_bing:
                 for link in sources.search_bing(bing, domain, file_type, max_pages, delay, log):
-                    keep(link)
+                    from_bing.add(keep(link))
             if ask_duckduckgo:
                 # DuckDuckGo is left alone for the rest of the run once it has refused to answer
                 result, duckduckgo_blocked = sources.search_duckduckgo(duckduckgo, domain, file_type, max_pages, delay, log)
                 for link in result:
-                    keep(link)
+                    from_duckduckgo.add(keep(link))
+                if duckduckgo_blocked:
+                    left_out.add("duckduckgo")
 
         if browser_engines:
             from . import browser
@@ -127,7 +156,7 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
             # Each link is handed over as soon as it is found, so that nothing is lost if the search is cut short
             found_in_browser = browser.search(
                 browser_engines, domain, file_types, max_pages, delay, browser_name, log, ask=ask_person,
-                on_link=keep, lookup=google_lookup, user_agent=user_agent, save_pages=save_pages,
+                on_link=keep, lookup=google_lookup, user_agent=user_agent, tallies=browser_tallies,
             )
             for link in found_in_browser:
                 keep(link)
@@ -141,7 +170,14 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
     for entry in archive_entries:
         archive_copies.setdefault(keep(entry.link), entry.archive_copy)
 
-    return sorted(found), archive_copies, interrupted
+    tallies = []
+    if "archive" in http_sources:
+        tallies.append((SOURCE_NAMES["archive"], len(archive_entries)))
+    for name, links_found in (("bing", from_bing), ("duckduckgo", from_duckduckgo)):
+        if name in asked:
+            tallies.append((SOURCE_NAMES[name], sources.tally_value(len(links_found), name in left_out)))
+    tallies.extend(browser_tallies)
+    return sorted(found), archive_copies, interrupted, tallies
 
 
 def download_files(file_links, output_dir, user_agent=None, archive_copies=None, file_types=None):
@@ -151,13 +187,13 @@ def download_files(file_links, output_dir, user_agent=None, archive_copies=None,
     """
     file_links = [link.strip() for link in file_links if link and link.strip()]
     file_types = file_types or links.DEFAULT_FILE_TYPES
-    log("[*] Downloading %d files now." % len(file_links))
     if not file_links:
+        log("[-] There are no files to download.")
         return 0, 0
 
     if not os.path.isdir(output_dir):
-        log("[*] The output directory %s does not exist. Creating directory %s." % (output_dir, output_dir))
         os.makedirs(output_dir, exist_ok=True)
+    log("[*] Downloading %d files to %s" % (len(file_links), os.path.abspath(output_dir)))
 
     downloaded = failed = 0
     for link in file_links:
@@ -170,7 +206,7 @@ def download_files(file_links, output_dir, user_agent=None, archive_copies=None,
             number += 1
         destination = os.path.join(output_dir, candidate)
 
-        log("Now Downloading %s" % link)
+        log("[*] Now Downloading %s" % link)
         problem = None
         try:
             try:
@@ -203,42 +239,49 @@ def download_files(file_links, output_dir, user_agent=None, archive_copies=None,
         else:
             downloaded += 1
 
-    log("[*] Downloaded %d files to %s (%d failed)." % (downloaded, os.path.abspath(output_dir), failed))
+    log("%s Downloaded %d files to %s (%d failed)." % ("[+]" if downloaded else "[-]", downloaded, os.path.abspath(output_dir), failed))
     return downloaded, failed
 
 
 def extract_metadata(folder, csv_path=None):
-    """Run ExifTool over a folder. Prints the 'Author' and 'Creator' values, or writes everything to a CSV."""
+    """Run ExifTool over a folder. Prints the 'Author' and 'Creator' values, or writes everything to a CSV.
+
+    Returns (whether it worked, a few words on what was extracted for the summary).
+    """
     if not folder or not os.path.isdir(folder):
-        log("[*] %s does not exist! Canceling metadata extraction." % folder)
-        return False
+        log("[!] %s does not exist! Canceling metadata extraction." % folder)
+        return False, ""
     path = exif.usable_exiftool(log)
     if not path:
-        return False
+        return False, ""
 
-    log("[*] Now extracting metadata from %s" % folder)
+    log("[*] Now extracting metadata from %s" % os.path.abspath(folder))
     try:
         if csv_path:
             count = exif.extract_all_to_csv(path, folder, csv_path)
             if count == 0:
-                log("[*] ExifTool found no metadata in %s." % folder)
-            else:
-                log("[*] Metadata for %d files was written to %s" % (count, csv_path))
-            return True
+                log("[-] ExifTool found no metadata in %s." % folder)
+                return True, "none found"
+            log("[+] Metadata for %d files was written to %s" % (count, csv_path))
+            return True, "all fields of %d files, in %s" % (count, csv_path)
 
         count, values = exif.extract_authors(path, folder)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         log("[!] Metadata extraction failed: %s" % error)
-        return False
+        return False, ""
 
     log("[*] ExifTool read %d files." % count)
-    log("\n[*] Extracted 'Author' and 'Creator' metadata")
-    if not values:
-        log("[*] No 'Author' or 'Creator' metadata was found.")
-    for value in values:
-        log(value)
     log()
-    return True
+    if not values:
+        log("[-] No 'Author' or 'Creator' metadata was found.")
+        log()
+        return True, "no 'Author' or 'Creator' values"
+    log("[+] Extracted 'Author' and 'Creator' metadata (%d values)" % len(values))
+    log()
+    for value in values:
+        log("    " + value)
+    log()
+    return True, "%d 'Author' and 'Creator' values" % len(values)
 
 
 def read_link_list(path):
@@ -282,22 +325,22 @@ def _cannot_write(path):
 
 def write_link_list(path, file_links):
     """Write the links to a file. Returns False, after printing them instead, if that fails."""
-    log("[*] Writing links to a file at %s" % path)
     try:
         with open(path, "w", encoding="ascii", errors="replace", newline="\n") as target:
             target.write("\n".join(file_links) + "\n")
+        log("[+] The links were written to %s" % path)
         return True
     except OSError as error:
         log("[!] The links could not be written to %s (%s). They are listed here instead:" % (path, error))
         for link in file_links:
-            log(link)
+            log("    " + link)
         return False
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        prog="python -m powermeta",
-        description="Find the documents a domain has published, download them, and read their metadata with ExifTool.",
+        prog="python -m justosint",
+        description="%s finds the documents a domain has published, downloads them, and reads their metadata with ExifTool." % NAME,
     )
     parser.add_argument("-d", "--domain", help="the target domain to search for files")
     parser.add_argument(
@@ -333,13 +376,9 @@ def build_parser():
         "browser window (default); request = ask Google's link with a plain web request, without the browser "
         "(Google's robots.txt asks programs not to do that); off = leave such results out",
     )
-    parser.add_argument(
-        "--save-pages", metavar="DIR", default="",
-        help="with --browser: keep a copy of every page that is read in DIR, for troubleshooting",
-    )
     parser.add_argument("--extract-dir", metavar="DIR", default="", help="only extract metadata from the files in DIR")
-    parser.add_argument("--install-exiftool", action="store_true", help="Windows: download the current ExifTool and put it next to PowerMeta")
-    parser.add_argument("--version", action="version", version="PowerMeta (Python) " + __version__)
+    parser.add_argument("--install-exiftool", action="store_true", help="Windows: download the current ExifTool and put it next to %s" % NAME)
+    parser.add_argument("--version", action="version", version="%s %s" % (NAME, __version__))
     return parser
 
 
@@ -364,12 +403,13 @@ def main(argv=None):
 def _run(argv):
     parser = build_parser()
     args = parser.parse_args(argv)
+    log(BANNER)
 
     if args.install_exiftool:
         return 0 if exif.install_exiftool(log=log) else 1
 
     if args.extract_dir:
-        return 0 if extract_metadata(args.extract_dir, args.csv or None) else 1
+        return 0 if extract_metadata(args.extract_dir, args.csv or None)[0] else 1
 
     if not args.domain and not args.list_in:
         parser.error("the target domain is required: -d targetdomain.com (or a list of links: --list-in FILE)")
@@ -393,6 +433,7 @@ def _run(argv):
 
     archive_copies = {}
     listed = True  # False while the links that were found exist nowhere but in this run
+    summary = []
     if args.list_in:
         # If a list of links was given, use that instead of searching
         if not os.path.isfile(args.list_in):
@@ -403,8 +444,11 @@ def _run(argv):
         except OSError as error:
             log("[!] The file list %s could not be read: %s" % (args.list_in, error))
             return 1
-        log("[*] Using the file list at %s" % args.list_in)
-        log("[*] A total of %d files were found." % len(file_links))
+        subject = args.list_in
+        log_settings([("Link list", args.list_in), ("File types", ", ".join(file_types))])
+        log()
+        log("%s A total of %d files were found in the list." % ("[+]" if file_links else "[-]", len(file_links)))
+        summary.append(("Links in the list", len(file_links)))
     else:
         domain = links.host_from_target(args.domain)
         if not links.is_valid_host(domain):
@@ -418,12 +462,24 @@ def _run(argv):
                 log("[!] The links cannot be written to %s: %s." % (args.list_out, problem))
                 return 1
 
-        file_links, archive_copies, interrupted = find_files(
-            domain, file_types, http_sources, browser_engines, args.user_agent or None, args.max_pages, args.delay,
-            args.browser_name, args.google_lookup, args.save_pages or None,
-        )
-        log("[*] A total of %d files were discovered." % len(file_links))
+        subject = domain
+        plain = [SOURCE_NAMES[name] for name in http_sources if name == "archive" or name not in browser_engines]
+        settings = [("Target domain", domain), ("File types", ", ".join(file_types)), ("Sources", ", ".join(plain) or "none")]
+        if browser_engines:
+            settings.append(("Browser", "%s (%s)" % (", ".join(SOURCE_NAMES[name] for name in browser_engines), args.browser_name)))
+        log_settings(settings)
         log()
+
+        file_links, archive_copies, interrupted, tallies = find_files(
+            domain, file_types, http_sources, browser_engines, args.user_agent or None, args.max_pages, args.delay,
+            args.browser_name, args.google_lookup,
+        )
+        log()
+        if tallies:
+            log_table("[*] Files found, by source", tallies, numbers=True)
+        log("%s A total of %d files were discovered on %s." % ("[+]" if file_links else "[-]", len(file_links), domain))
+        log()
+        summary.append(("Files found", len(file_links)))
 
         saved = bool(args.list_out and file_links) and write_link_list(args.list_out, file_links)
         # With --list-out the links are in the file, or were printed when it could not be written
@@ -434,11 +490,11 @@ def _run(argv):
             elif file_links and not listed:
                 log("[*] The links found so far (use --list-out FILE to have them written to a file):")
                 for link in file_links:
-                    log(link)
+                    log("    " + link)
             return 130
 
     if not file_links:
-        log("[*] Nothing to download.")
+        log("[-] Nothing to download.")
         return 0
 
     # If no output directory was named, use one named after the current date and time
@@ -453,11 +509,13 @@ def _run(argv):
             if not listed:
                 log("[*] The links that were found (use --list-out FILE to have them written to a file):")
                 for link in file_links:
-                    log(link)
+                    log("    " + link)
             return 1
+        summary.append(("Files downloaded", "%d (%d failed)" % (downloaded, failed) if failed else downloaded))
         if downloaded == 0:
             # Every download failed: there is nothing to extract metadata from
             return 1 if failed else 0
+        summary.append(("Saved to", os.path.abspath(output_dir)))
     else:
         log("[*] No files will be downloaded.")
 
@@ -466,11 +524,16 @@ def _run(argv):
         return status
 
     if args.extract or ask_yes_no("Would you like to extract metadata from all of the files downloaded now?"):
-        if not extract_metadata(output_dir, args.csv or None):
+        worked, extracted = extract_metadata(output_dir, args.csv or None)
+        if not worked:
             status = 1
+        elif extracted:
+            summary.append(("Metadata", extracted))
     else:
         log(
             "[*] No metadata will be extracted at this time. To extract it later run: "
-            'python -m powermeta --extract-dir "%s"' % output_dir
+            'python -m justosint --extract-dir "%s"' % output_dir
         )
+
+    log_table("[*] Summary for %s" % subject, summary)
     return status

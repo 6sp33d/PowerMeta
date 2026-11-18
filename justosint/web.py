@@ -21,7 +21,7 @@ DEFAULT_USER_AGENT = (
     "Chrome/138.0.0.0 Safari/537.36"
 )
 # What a service that is made to be used by programs (the Internet Archive) is sent
-PROGRAM_USER_AGENT = "PowerMeta/" + __version__
+PROGRAM_USER_AGENT = "justOSINT/" + __version__
 
 # No answer is read beyond these sizes: a server must not be able to fill the memory or the disk
 MAX_PAGE_BYTES = 64 * 1024 * 1024

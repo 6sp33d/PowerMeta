@@ -1,6 +1,6 @@
 """Metadata extraction with ExifTool (https://exiftool.org/).
 
-ExifTool before 12.24 can be made to run code by a crafted file (CVE-2021-22204), and PowerMeta runs it
+ExifTool before 12.24 can be made to run code by a crafted file (CVE-2021-22204), and justOSINT runs it
 on files downloaded from the target, so older copies are refused.
 """
 
@@ -40,12 +40,12 @@ def _on_path(name):
 
 
 def install_folder():
-    """The folder that holds the PowerMeta scripts: ExifTool is installed, and looked for, there."""
+    """The folder that holds the justOSINT scripts: ExifTool is installed, and looked for, there."""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def find_exiftool():
-    """ExifTool next to the PowerMeta scripts, or on the PATH. None if it is not installed."""
+    """ExifTool next to the justOSINT scripts, or on the PATH. None if it is not installed."""
     name = "exiftool.exe" if os.name == "nt" else "exiftool"
     candidate = os.path.join(install_folder(), name)
     if os.path.isfile(candidate):
@@ -68,8 +68,8 @@ def usable_exiftool(log=print):
     path = find_exiftool()
     if not path:
         log(
-            "[*] ExifTool was not found next to PowerMeta or on the PATH. On Windows run "
-            "'python -m powermeta --install-exiftool'; elsewhere install it with your package manager."
+            "[!] ExifTool was not found next to justOSINT or on the PATH. On Windows run "
+            "'python -m justosint --install-exiftool'; elsewhere install it with your package manager."
         )
         return None
     version = exiftool_version(path)
@@ -158,7 +158,7 @@ def extract_all_to_csv(path, folder, csv_path):
 
 def install_exiftool(destination=None, log=print):
     """Windows: download the current official ExifTool package, check it against the SHA-256 checksum
-    published on exiftool.org, and unpack exiftool.exe and its exiftool_files folder next to PowerMeta.
+    published on exiftool.org, and unpack exiftool.exe and its exiftool_files folder next to justOSINT.
     Returns True if it was installed."""
     if os.name != "nt":
         log(
@@ -169,7 +169,7 @@ def install_exiftool(destination=None, log=print):
 
     destination = os.path.abspath(destination or install_folder())
     # A plain agent name: the download mirror answers browser-like agents with a web page instead of the file
-    agent = "PowerMeta"
+    agent = "justOSINT"
     fetcher = Fetcher(user_agent=agent)
     try:
         version = fetcher.get("https://exiftool.org/ver.txt").text.strip()
@@ -188,7 +188,7 @@ def install_exiftool(destination=None, log=print):
             return False
         expected = match.group(1).lower()
 
-        with tempfile.TemporaryDirectory(prefix="powermeta-exiftool-") as work:
+        with tempfile.TemporaryDirectory(prefix="justosint-exiftool-") as work:
             zip_path = os.path.join(work, zip_name)
             log("[*] Downloading ExifTool %s (%s)" % (version, zip_name))
             download(
@@ -208,7 +208,7 @@ def install_exiftool(destination=None, log=print):
                     "(expected %s, got %s). Nothing was installed." % (expected, digest.hexdigest())
                 )
                 return False
-            log("[*] Checksum verified.")
+            log("[+] Checksum verified.")
 
             unpacked = os.path.join(work, "unpacked")
             with zipfile.ZipFile(zip_path) as archive:
@@ -230,7 +230,7 @@ def install_exiftool(destination=None, log=print):
             shutil.copytree(files, target_files)
             shutil.copyfile(launcher, os.path.join(destination, "exiftool.exe"))
 
-        log("[*] ExifTool %s was installed to %s" % (version, destination))
+        log("[+] ExifTool %s was installed to %s" % (version, destination))
         return True
     except (FetchError, OSError, zipfile.BadZipFile) as error:
         log("[!] ExifTool could not be installed: %s" % error)

@@ -1,7 +1,7 @@
 import unittest
 
-from powermeta import links, sources
-from powermeta.web import Fetcher
+from justosint import links, sources
+from justosint.web import Fetcher
 
 from .support import LocalServer, RawServer, bing_page, duckduckgo_page, fixture, patched, raw_answer
 
@@ -25,7 +25,7 @@ class Bing(unittest.TestCase):
         # Page 1 held 10 results, so page 2 starts at result 11; it adds nothing and the search ends
         self.assertEqual([request.query["first"][0] for request in server.requests], ["1", "11"])
         self.assertEqual(server.requests[0].query["q"][0], "site:legislature.mi.gov filetype:pdf")
-        self.assertIn("[*] Bing: 3 pdf files found", log)
+        self.assertIn("[+] Bing: 3 pdf files found", log)
 
     def test_says_so_when_no_result_is_on_the_domain(self):
         with LocalServer(lambda request: (200, fixture("bing_unrelated.html"))) as server:
@@ -33,7 +33,7 @@ class Bing(unittest.TestCase):
                 log = Messages()
                 found = sources.search_bing(Fetcher(), "nasa.gov", "pdf", delay=0, log=log)
         self.assertEqual(found, [])
-        self.assertIn("Bing showed pages of other sites only for 'site:nasa.gov filetype:pdf': it has no pdf files of the site, or", log.text())
+        self.assertIn("[-] Bing showed only other sites for 'site:nasa.gov filetype:pdf': it has no pdf files of the site, or", log.text())
         self.assertEqual(len(server.requests), 1)
 
     def test_bing_is_first_asked_for_the_site_alone(self):
@@ -59,8 +59,8 @@ class Bing(unittest.TestCase):
             "one of five": (False, "with pages of other sites (1 of its 5 results are on the site)"),
             "a link that is not a result": (False, "with pages of other sites (0 of its 2 results are on the site)"),
             "most of them": (True, "to see whether it keeps to the site"),
-            "nothing": (False, "Bing returned no results for 'site:legislature.mi.gov': it has no pages of the site, or it did not answer"),
-            "a check page": (False, "or it did not answer the search (a check page looks the same"),
+            "nothing": (False, "Bing returned no results for 'site:legislature.mi.gov': it has no pages of the site, or it showed a check"),
+            "a check page": (False, "or it showed a check instead.\n[!] Bing is left out for this run."),
             "error": (False, "Bing did not answer (HTTP 429"),
         }
         for name, answer in answers.items():
@@ -85,7 +85,7 @@ class Bing(unittest.TestCase):
             self.assertEqual(links.bing_keeps_to_site(page, "legislature.mi.gov"), (10, 10, True))
 
     def test_one_session_is_kept_for_all_searches_of_an_engine(self):
-        from powermeta import cli
+        from justosint import cli
 
         def respond(request):
             if request.path == "/cdx":
@@ -95,8 +95,9 @@ class Bing(unittest.TestCase):
         with LocalServer(respond) as server:
             with patched(sources, BING_URL=server.url + "/search", ARCHIVE_INDEX_URL=server.url + "/cdx"):
                 with patched(cli, log=lambda message="": None):
-                    cli.find_files("example.com", ["pdf", "docx"], ["bing"], [], delay=0)
+                    found, copies, interrupted, tallies = cli.find_files("example.com", ["pdf", "docx"], ["bing"], [], delay=0)
         cookies = [request.headers.get("Cookie") for request in server.requests]
+        self.assertEqual((found, copies, interrupted, tallies), ([], {}, False, [("Bing", 0)]))
         # The cookie Bing set with its first answer comes back with every later search
         self.assertEqual(cookies, [None, "MUID=abc123", "MUID=abc123"])
 
@@ -200,7 +201,7 @@ class Archive(unittest.TestCase):
         self.assertEqual(query["limit"], ["10000"])
         # Both filters arrive intact, "+" signs included
         self.assertEqual(query["filter"], ["statuscode:200", links.archive_filter(["pdf", "xlsx"])])
-        self.assertIn("[*] Internet Archive: 2 files found", log)
+        self.assertIn("[+] Internet Archive: 2 files found", log)
         self.assertNotIn("incomplete", log.text())
 
     def test_says_so_when_the_answer_is_cut_off(self):
@@ -215,7 +216,7 @@ class Archive(unittest.TestCase):
             with patched(sources, ARCHIVE_INDEX_URL=server.url + "/cdx"):
                 log = Messages()
                 self.assertEqual(sources.search_archive(Fetcher(), "example.com", ["pdf"], log=log), [])
-        self.assertIn("[*] Internet Archive: 0 files found", log)
+        self.assertIn("[-] Internet Archive: no files found", log)
 
     def test_an_error_is_reported_not_raised(self):
         with LocalServer(lambda request: (503, "busy")) as server:
@@ -242,7 +243,7 @@ class Archive(unittest.TestCase):
     def test_gzip_answers_are_unpacked_within_a_limit(self):
         import gzip
 
-        from powermeta import web
+        from justosint import web
 
         packed = gzip.compress(b"http://example.com/a.pdf 20200101000000\n")
         with RawServer(lambda path: raw_answer(packed, b"Content-Encoding: gzip\r\n")) as server:

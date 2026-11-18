@@ -25,16 +25,10 @@ import urllib.parse
 
 from . import links, sources, web
 
-# Kept in variables so the tests can point them at a local server
+# Where each search engine is asked
 GOOGLE_URL = "https://www.google.com/search"
 BING_URL = "https://www.bing.com/search"
 DUCKDUCKGO_URL = "https://html.duckduckgo.com/html/"
-
-# Extra command-line arguments for the browser, and where it keeps its profile (the tests run it without a
-# window and with a throw-away profile)
-EXTRA_ARGUMENTS = []
-EXTRA_PREFERENCES = {}
-PROFILE_FOLDER = None
 
 # Seconds a page may take to load; seconds a result link gets to show where it leads; seconds a click
 # gets to reach the search engine; and seconds a page of the search engine may stay in the window
@@ -110,6 +104,12 @@ def _first_line(error):
     return text or error.__class__.__name__
 
 
+def _profile_folder(browser_name):
+    """The folder the browser keeps its profile in. It is a folder of its own, so that an answered consent
+    box or check is remembered for the next run and the person's own browser profile is left alone."""
+    return os.path.join(os.path.expanduser("~"), ".justosint", "browser-" + browser_name)
+
+
 def page_state(engine, url, source):
     """What a search engine is showing: "results", "empty" (no results), or "check" (a challenge or a
     consent box that a person has to deal with)."""
@@ -147,15 +147,15 @@ def has_search_box(source):
 class Session:
     """One browser window, kept open for the whole run."""
 
-    def __init__(self, browser_name="chrome", log=print, ask=input, profile_folder=None, network_log=True,
-                 on_link=None, lookup="click", user_agent=None, save_pages=None):
+    def __init__(self, browser_name="chrome", log=print, ask=input, network_log=True, on_link=None,
+                 lookup="click", user_agent=None):
         self.log = log
         self.ask = ask
         self.on_link = on_link
         self.lookup = lookup  # how the address of a result that hides it is read: see LOOKUPS
         self.user_agent = user_agent or web.PROGRAM_USER_AGENT  # for lookups with plain requests
-        self.save_pages = save_pages
         self.found = []  # every link found in this window, in the order found
+        self.per_engine = {}  # {search engine: the links it gave}
         self.skipped = set()  # search engines that are left alone for the rest of the run
         self.gone = False  # the window was closed, or the browser can no longer be reached
         self.lookups_off = lookup == "off"  # results that hide their address are left out
@@ -167,7 +167,6 @@ class Session:
         self._unresolved_in_a_row = 0
         self._requests_refused = 0
         self._resolved = {}
-        self._saved = 0
         try:
             import selenium
             from selenium import webdriver
@@ -183,10 +182,7 @@ class Session:
         self._errors = WebDriverException
         self._stale = StaleElementReferenceException
 
-        profile_folder = profile_folder or PROFILE_FOLDER
-        if profile_folder is None:
-            # A folder of its own, so that an answered consent box or check is remembered for the next run
-            profile_folder = os.path.join(os.path.expanduser("~"), ".powermeta", "browser-" + browser_name)
+        profile_folder = _profile_folder(browser_name)
         try:
             os.makedirs(profile_folder, exist_ok=True)
         except OSError as error:
@@ -199,15 +195,11 @@ class Session:
             options = webdriver.ChromeOptions()
             logging_capability = "goog:loggingPrefs"
         options.add_argument("--user-data-dir=" + profile_folder)
-        for argument in EXTRA_ARGUMENTS:
-            options.add_argument(argument)
         if network_log:
             # The network log is how the address behind one of Google's redirect links is read
             options.set_capability(logging_capability, {"performance": "ALL"})
         # Result links point at documents: they must not open in the built-in viewer, and nothing is saved
-        preferences = {"plugins.always_open_pdf_externally": True, "download_restrictions": 3}
-        preferences.update(EXTRA_PREFERENCES)
-        options.add_experimental_option("prefs", preferences)
+        options.add_experimental_option("prefs", {"plugins.always_open_pdf_externally": True, "download_restrictions": 3})
 
         def start(service=None):
             driver_class = webdriver.Edge if browser_name == "edge" else webdriver.Chrome
@@ -217,7 +209,7 @@ class Session:
             self.driver = self._start_apart_from_ctrl_c(start, browser_name) or start()
         except Exception as error:
             hint = (
-                " If another PowerMeta browser window is still open, close it first: both would use the "
+                " If another justOSINT browser window is still open, close it first: both would use the "
                 "profile folder %s." % profile_folder
             )
             if browser_name == "edge":
@@ -267,8 +259,9 @@ class Session:
         except Exception:
             pass
 
-    def keep(self, link):
+    def keep(self, link, engine=None):
         """Remember a link that was found, and hand it to whoever asked to be told at once."""
+        self.per_engine.setdefault(engine, set()).add(link)
         if link not in self.found:
             self.found.append(link)
             if self.on_link is not None:
@@ -337,22 +330,6 @@ class Session:
             self._failed(error)
             return []
         return [href for href in (found or []) if isinstance(href, str)]
-
-    def save_page(self, name):
-        """With --save-pages: keep a copy of the page in the window, for troubleshooting."""
-        if not self.save_pages or self.gone:
-            return
-        self._saved += 1
-        name = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-")
-        path = os.path.join(self.save_pages, "%03d-%s.html" % (self._saved, name))
-        try:
-            os.makedirs(self.save_pages, exist_ok=True)
-            with open(path, "w", encoding="utf-8", errors="replace") as target:
-                target.write("<!-- %s -->\n" % self.url().replace("--", "- -"))
-                target.write(self.source())
-        except OSError as error:
-            self.log("[!] The page could not be saved to %s (%s). No more pages are saved." % (path, error))
-            self.save_pages = None
 
     def press_form(self, offset):
         """Press the form on the page whose offset field ("s") has this value, and wait for the page it
@@ -427,7 +404,6 @@ class Session:
                 return False
             if not blocked:
                 return True
-            self.save_page(engine + "-check")
             if not self._wait_for_person(engine, question):
                 return False
             if not self._back_to(engine, url, in_the_way):
@@ -449,9 +425,9 @@ class Session:
         self._asked_about_empty_page.add(engine)
         name = NAMES[engine]
         question = (
-            "[?] Nothing could be read from %s's page. If the browser window shows a check or a consent box, "
-            "deal with it there and then press Enter here. If the page simply has no results, just press Enter. "
-            "(Type s and Enter to skip %s.) " % (name, name)
+            "[?] Nothing could be read from %s's page. If the browser window shows a check, deal with it there, "
+            "then press Enter here. If the page simply has no results, just press Enter. (s and Enter skips %s.) "
+            % (name, name)
         )
         # With nobody there to look, the page is taken for what it most likely is: one without results
         if not self._wait_for_person(engine, question, unattended=""):
@@ -758,7 +734,6 @@ class Session:
                         return None
                     checks += 1 if check else 0
                     asked = True
-                    self.save_page("google-result-link")
                     what = "a check" if check else "a page of its own instead of the result"
                     answer = self._answer(
                         "[?] Google is showing %s in the browser window. If something has to be done there "
@@ -880,7 +855,7 @@ class Session:
         self._go(results_url)
 
 
-def _keep(session, candidates, domain, file_type, found):
+def _keep(session, engine, candidates, domain, file_type, found):
     """Add the wanted files among the candidates to found. Returns (new files, links on the domain)."""
     new, on_domain = 0, 0
     for link in candidates:
@@ -893,7 +868,7 @@ def _keep(session, candidates, domain, file_type, found):
             if link not in found:
                 found.append(link)
                 new += 1
-                session.keep(link)
+                session.keep(link, engine)
     return new, on_domain
 
 
@@ -936,8 +911,7 @@ def search_google(session, domain, file_type, max_pages=5, delay=2):
                 addresses, hidden = read()
             elif page_number == 1 and session.second_look("google", url):
                 addresses, hidden = read()
-        session.save_page("google-%s-page-%d" % (file_type, page_number))
-        new, _ = _keep(session, addresses, domain, file_type, found)
+        new, _ = _keep(session, "google", addresses, domain, file_type, found)
 
         # Google's result links do not show where they lead: each result is clicked to find out
         if hidden and not session.lookups_off:
@@ -955,7 +929,7 @@ def search_google(session, domain, file_type, max_pages=5, delay=2):
                 time.sleep(delay)
             destination = session.resolve(hidden[position], url, domain)
             if destination:
-                new += _keep(session, [destination], domain, file_type, found)[0]
+                new += _keep(session, "google", [destination], domain, file_type, found)[0]
             else:
                 unread += 1
             position += 1
@@ -976,7 +950,7 @@ def search_google(session, domain, file_type, max_pages=5, delay=2):
 
     if unread:
         log("[!] The address behind %d Google results was not read." % unread)
-    log("[*] Google (browser): %d %s files found" % (len(found), file_type))
+    log(sources.tally("Google (browser)", len(found), "%s files" % file_type))
     return found
 
 
@@ -999,7 +973,6 @@ def bing_knows_site(session, domain):
         results = links.count_bing_results(session.source())
     if session.gone or "bing" in session.skipped:
         return False
-    session.save_page("bing-site")
     results, on_domain, keeps_to_site = links.bing_keeps_to_site(session.source(), domain)
     if keeps_to_site:
         return True
@@ -1027,8 +1000,7 @@ def search_bing(session, domain, file_type, max_pages=5, delay=2):
         if not session.show("bing", url):
             break
         results = links.count_bing_results(session.source())
-        session.save_page("bing-%s-page-%d" % (file_type, page_number))
-        new, on_domain = _keep(session, [links.unwrap_bing(href) for href in session.hrefs()], domain, file_type, found)
+        new, on_domain = _keep(session, "bing", [links.unwrap_bing(href) for href in session.hrefs()], domain, file_type, found)
         results_seen += results
         on_domain_seen += on_domain
         if results == 0 or new == 0:
@@ -1037,7 +1009,7 @@ def search_bing(session, domain, file_type, max_pages=5, delay=2):
 
     if results_seen > 0 and on_domain_seen == 0:
         log(sources.BING_NO_FILES % (query, file_type))
-    log("[*] Bing (browser): %d %s files found" % (len(found), file_type))
+    log(sources.tally("Bing (browser)", len(found), "%s files" % file_type))
     return found
 
 
@@ -1057,8 +1029,7 @@ def search_duckduckgo(session, domain, file_type, max_pages=5, delay=2):
             if session.gone or "duckduckgo" in session.skipped:
                 break
             log("[*] Now Analyzing page %d of DuckDuckGo search results" % page_number)
-            session.save_page("duckduckgo-%s-page-%d" % (file_type, page_number))
-            new, _ = _keep(session, [links.unwrap_duckduckgo(href) for href in session.hrefs()], domain, file_type, found)
+            new, _ = _keep(session, "duckduckgo", [links.unwrap_duckduckgo(href) for href in session.hrefs()], domain, file_type, found)
             if new == 0 or page_number == max_pages:
                 break
 
@@ -1077,7 +1048,7 @@ def search_duckduckgo(session, domain, file_type, max_pages=5, delay=2):
             if not session.clear_check("duckduckgo"):
                 break
 
-    log("[*] DuckDuckGo (browser): %d %s files found" % (len(found), file_type))
+    log(sources.tally("DuckDuckGo (browser)", len(found), "%s files" % file_type))
     return found
 
 
@@ -1085,28 +1056,32 @@ ENGINES = {"google": search_google, "bing": search_bing, "duckduckgo": search_du
 
 
 def search(engines, domain, file_types, max_pages=5, delay=2, browser_name="chrome", log=print, ask=input,
-           on_link=None, lookup="click", user_agent=None, save_pages=None):
+           on_link=None, lookup="click", user_agent=None, tallies=None):
     """Run the searches of every named engine and file type in one browser window. Returns the links found.
 
     on_link, if given, is called with each link as soon as it is found, so that the caller has what was
     found when the search ends early. Ctrl+C is passed on to the caller, after the browser has been closed.
     lookup says how the address of a Google result that hides it is read: "click" (the result is clicked
     in the window), "request" (Google's link is asked with a plain web request first) or "off".
+    tallies, if given, is a list that gets one (name, number of files or a remark) entry per search engine.
     """
+    def tally(engine, count, stopped):
+        if tallies is not None:
+            tallies.append((NAMES[engine] + " (browser)", sources.tally_value(count, stopped)))
+
     try:
         session = Session(
-            browser_name, log, ask, network_log="google" in engines, on_link=on_link, lookup=lookup,
-            user_agent=user_agent, save_pages=save_pages,
+            browser_name, log, ask, network_log="google" in engines, on_link=on_link, lookup=lookup, user_agent=user_agent
         )
     except BrowserUnavailable as error:
         log("[!] The browser search was not done: %s" % error)
+        for engine in engines:
+            tally(engine, 0, True)
         return []
 
-    log(
-        "[*] A browser window has been opened. If a search engine shows a check or a consent box, "
-        "you will be asked to deal with it there."
-    )
+    log("[*] A browser window has been opened. If a search engine shows a check there, you will be asked to deal with it.")
     session.delay = delay
+    through = set()  # the search engines that were asked for every file type
     try:
         for engine in engines:
             if session.gone:
@@ -1122,11 +1097,16 @@ def search(engines, domain, file_types, max_pages=5, delay=2, browser_name="chro
                     time.sleep(delay)
                 first = False
                 ENGINES[engine](session, domain, file_type, max_pages, delay)
+            else:
+                if not session.gone and engine not in session.skipped:
+                    through.add(engine)
     except KeyboardInterrupt:
         raise
     except Exception as error:
         # Selenium or the browser failed in a way that was not foreseen: keep what was found
         log("[!] The browser search stopped early (%s). What it had found is kept." % _first_line(error))
     finally:
+        for engine in engines:
+            tally(engine, len(session.per_engine.get(engine, ())), engine not in through)
         session.close()
     return session.found

@@ -13,10 +13,25 @@ import urllib.parse
 from . import links
 from .web import FetchError
 
-# Kept in variables so the tests can point them at a local server
+# Where each source is asked
 BING_URL = "https://www.bing.com/search"
 DUCKDUCKGO_URL = "https://html.duckduckgo.com/html/"
 ARCHIVE_INDEX_URL = "https://web.archive.org/cdx/search/cdx"
+
+
+def tally(source, count, what="files"):
+    """The line that says what a source gave: "[+] Bing: 3 pdf files found" or "[-] Bing: no pdf files found"."""
+    if count:
+        return "[+] %s: %d %s found" % (source, count, what)
+    return "[-] %s: no %s found" % (source, what)
+
+
+def tally_value(count, stopped=False):
+    """What a source gave, for the table at the end of the search: a number, or a remark when the source
+    was left out or stopped before it was through."""
+    if not stopped:
+        return count
+    return "%d (stopped early)" % count if count else "left out"
 
 
 def _collect(page_links, unwrap, domain, file_type, found):
@@ -61,7 +76,7 @@ def search_archive(fetcher, domain, file_types, max_results=10000, log=print):
         return []
 
     entries = links.parse_archive_index(page.text, domain, file_types)
-    log("[*] Internet Archive: %d files found" % len(entries))
+    log(tally("Internet Archive", len(entries)))
 
     # The index stops at the limit without saying so
     if len([line for line in page.text.split("\n") if line.strip()]) >= max_results:
@@ -72,19 +87,17 @@ def search_archive(fetcher, domain, file_types, max_results=10000, log=print):
     return entries
 
 
+# What is said about Bing's answers. Each is two short lines rather than one long one.
 BING_OTHER_SITES = (
-    "[!] Bing answered the search for '%s' with pages of other sites (%d of its %d results are on the site). "
-    "It does this when it takes a search for an automated one, or does not know the site. Nothing from "
-    "such an answer is kept, and Bing is left out for the rest of this run."
+    "[!] Bing answered '%s' with pages of other sites (%d of its %d results are on the site).\n"
+    "[!] It does that with searches it takes for automated, or for a site it does not know. "
+    "Nothing of it is kept; Bing is left out for this run."
 )
 BING_NO_RESULTS = (
-    "[!] Bing returned no results for '%s': it has no pages of the site, or it did not answer the search "
-    "(a check page looks the same to this program). It is left out for the rest of this run."
+    "[-] Bing returned no results for '%s': it has no pages of the site, or it showed a check instead.\n"
+    "[!] Bing is left out for this run."
 )
-BING_NO_FILES = (
-    "[!] Bing showed pages of other sites only for '%s': it has no %s files of the site, or it has stopped "
-    "keeping to the site."
-)
+BING_NO_FILES = "[-] Bing showed only other sites for '%s': it has no %s files of the site, or has stopped keeping to it."
 
 
 def bing_knows_site(fetcher, domain, log=print):
@@ -142,7 +155,7 @@ def search_bing(fetcher, domain, file_type, max_pages=5, delay=2, log=print):
     # Bing fills the page with other sites when it has nothing on the site for a search
     if results_seen > 0 and on_domain_seen == 0:
         log(BING_NO_FILES % (query, file_type))
-    log("[*] Bing: %d %s files found" % (len(found), file_type))
+    log(tally("Bing", len(found), "%s files" % file_type))
     return found
 
 
@@ -199,5 +212,5 @@ def search_duckduckgo(fetcher, domain, file_type, max_pages=5, delay=2, log=prin
 
     if results_seen > 0 and on_domain_seen == 0:
         log("[!] DuckDuckGo returned results, but none of them are on %s." % domain)
-    log("[*] DuckDuckGo: %d %s files found" % (len(found), file_type))
+    log(tally("DuckDuckGo", len(found), "%s files" % file_type))
     return found, blocked
