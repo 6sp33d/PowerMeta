@@ -304,13 +304,18 @@ class Session:
             if not self._failed(error):
                 self.log("[!] The browser could not open %s: %s" % (url, _first_line(error)))
             return False
-        self._settle()
+        arrived = self._settle()
         if self.gone:
             return False
-        # Not every failure makes the command fail: after some the window just shows the browser's error page
+        # Not every failure makes the command fail. After some the window shows the browser's error page,
+        # and an answer that broke off on the way leaves a page that never finishes loading.
         problem = self._error_page()
+        if problem is None and not arrived:
+            problem = "the page did not finish loading"
+        if self.gone:
+            return False
         if problem is None:
-            return not self.gone
+            return True
         self.log("[!] The browser could not open %s: %s" % (url, problem))
         return False
 
@@ -330,17 +335,24 @@ class Session:
         return "it shows an error page of its own" + (" (%s)" % reason if reason else "")
 
     def _settle(self, seconds=20):
-        """Wait until the page in the window has finished loading."""
+        """Wait until the page in the window has finished loading. Returns False if the page itself had
+        not arrived by the end of the wait: its answer broke off on the way, and what the window holds
+        of it (nothing, or its first part) is not the page. A page that is all there and still waits
+        for something it shows (a picture, a frame) has arrived."""
         deadline = time.time() + seconds
+        state = ""
         while time.time() < deadline:
             try:
-                if self.driver.execute_script("return document.readyState") == "complete":
+                state = self.driver.execute_script("return document.readyState")
+                if state == "complete":
                     break
             except self._errors as error:
                 if self._failed(error):
-                    return
+                    return False
+                state = ""  # a command that fails says nothing about the page
             time.sleep(0.25)
         time.sleep(0.5)
+        return state != "loading"
 
     def url(self):
         try:
@@ -394,9 +406,10 @@ class Session:
             try:
                 old_page.is_enabled()
             except self._stale:
-                self._settle()
-                # What replaced the old page may be the browser's error page: the request got no answer
-                return self._error_page() is None and not self.gone
+                arrived = self._settle()
+                # What replaced the old page may be the browser's error page (the request got no answer),
+                # or a page that never finished loading (the answer broke off)
+                return arrived and self._error_page() is None and not self.gone
             except self._errors as error:
                 self._failed(error)
                 return False
@@ -473,11 +486,12 @@ class Session:
         """After the person has dealt with a check the browser normally lands back on the results.
         If it is somewhere else, or the window still shows the check, open the search again. Returns
         False if the window does not show a page of the search engine in the end."""
-        self._settle()
+        arrived = self._settle()
         if self.gone:
             return False
-        # What came after the check may be the browser's own error page: the request got no answer
-        no_page = self._error_page() is not None
+        # What came after the check may be no page of the site: the browser's own error page (the
+        # request got no answer), or a page that never finished loading (the answer broke off)
+        no_page = not arrived or self._error_page() is not None
         if url is None:
             # There is no address to open again: the page came from a form
             return not no_page and not self.gone
@@ -1021,6 +1035,10 @@ def bing_knows_site(session, domain):
     log("[*] Asking Bing in the browser for '%s', to see whether it keeps to the site" % query)
     url = BING_URL + "?" + urllib.parse.urlencode({"q": query})
     if not session.show("bing", url):
+        # Why the page could not be shown has been said. A skipped engine and a closed window end
+        # more than this one search, and that has been said as well.
+        if not session.gone and "bing" not in session.skipped:
+            log("[!] Bing is left out for this run.")
         return False
     results = links.count_bing_results(session.source())
     if results == 0 and session.second_look("bing", url):

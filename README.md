@@ -139,8 +139,8 @@ What to expect:
 - You have to be there. justOSINT never answers a check itself, and does nothing to hide that the browser is automated: the browser shows its "controlled by automated test software" notice and tells the pages so. A search engine may keep showing checks or refuse altogether; type `s` at the prompt to leave it out.
 - The search engines' terms do not allow automated searching. Expect checks, and possibly a temporary block of your network by a search engine. Do not sign in to an account in that window.
 - The browser keeps its own profile in a folder named `.justosint` in your home folder, so a consent box you have answered stays answered.
-- Bing is first asked for `site:targetdomain.com` alone. Unless most results of that search are on the site (see the table above), it is left out for the run.
-- When the browser cannot show a results page (the connection fails, or the answer is an error without a page), justOSINT says so and carries on with the next search, and the summary marks that search engine with one of the remarks above.
+- Bing is first asked for `site:targetdomain.com` alone. Unless most results of that search are on the site (see the table above), it is left out for the run. It is also left out when the page of that search cannot be shown.
+- When the browser cannot show a results page (the connection fails or breaks off, or the answer is an error without a page), justOSINT says so and carries on with the next search, and the summary marks that search engine with one of the remarks above. Nothing is read from a page that arrived only in part.
 - Nothing is saved by the browser. The files are downloaded afterwards, by justOSINT itself, if you ask for that.
 
 ### Google
@@ -204,7 +204,7 @@ justOSINT looks for ExifTool next to `justOSINT.ps1` and on the PATH. It does no
 Good to know:
 
 - Unless `--user-agent` says otherwise, the Internet Archive is told that the requests come from justOSINT (`justOSINT/1.0.0`); the search engines and the target site are sent a browser-like User-Agent, as in the PowerShell version.
-- Ctrl+C during the search stops the run but keeps what was found: the links are written to the `--list-out` file, or printed if there is none, and can be downloaded later with `--list-in`. Ctrl+C during the downloads keeps the files that were saved by then. Either way the run still ends with the summary.
+- Ctrl+C during the search stops the run but keeps what was found: the links are written to the `--list-out` file, or printed if there is none, and can be downloaded later with `--list-in`. Ctrl+C during the downloads keeps the files that were saved by then. Either way the run still ends with the summary. Ctrl+C is not listened to while what was found is put together and written to the file, nor once the summary has begun, so a second press right after the first costs nothing; while a list of links is being printed on the screen, it ends that list.
 - Without a terminal (for example in a scheduled job) nothing can be asked: use `--download` and `--extract`, and a question of the browser search is answered in the way that lets the run carry on.
 - The exit code is 0 when the run finished (also when it found nothing, or when a search engine or the browser could not be used); 1 when the input was not usable, the output folder or link list could not be written, nothing could be downloaded, or the metadata could not be extracted; 2 for a wrong option; 130 after Ctrl+C.
 

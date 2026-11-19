@@ -6,6 +6,7 @@ import argparse
 import datetime
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -19,6 +20,43 @@ SOURCE_NAMES = {"archive": "Internet Archive", "bing": "Bing", "duckduckgo": "Du
 
 # Control characters, and the characters that reverse the direction of text
 _UNPRINTABLE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+class _CtrlC:
+    """Whether Ctrl+C is listened to.
+
+    It is while something goes on that can take long and can be cut short: the search, a list of
+    links being printed, a question, the downloads, the reading of metadata. It is not while what a
+    search found is put together and stored, nor from the summary on. There Ctrl+C would stop
+    nothing that takes long - it could only cost what the run was for. A second Ctrl+C typed right
+    after the first is what lands in those moments, and with thousands of files they are not short.
+    """
+
+    def __init__(self):
+        self._listened = None  # what listened to Ctrl+C before it was turned away
+
+    def unheard(self):
+        """From now on Ctrl+C does nothing. If it was typed an instant ago and has not yet had its
+        effect, KeyboardInterrupt is raised from here, and nothing is changed."""
+        if self._listened is not None:
+            return
+        listened = signal.getsignal(signal.SIGINT)
+        if listened is None:
+            return  # not set from Python, so it could not be put back
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+        except ValueError:
+            return  # not the main thread, which is the only one Ctrl+C reaches
+        self._listened = listened
+
+    def heard(self):
+        """From now on Ctrl+C is listened to again, as it was before."""
+        if self._listened is not None:
+            listened, self._listened = self._listened, None
+            signal.signal(signal.SIGINT, listened)
+
+
+ctrl_c = _CtrlC()
 
 
 def log(message=""):
@@ -140,11 +178,13 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
 
     Returns (sorted links, {link: address of the Internet Archive's copy}, interrupted, tallies).
     interrupted is True if Ctrl+C ended the search early; what had been found by then is still returned.
+    When this returns, Ctrl+C is no longer listened to (see ctrl_c): the caller has to store what
+    was found before it listens again.
     tallies says for each source what it gave: a list of (name, number of files, remark), where the
     remark tells of a source that did not get through ("left out", "stopped early", "did not answer",
     "incomplete": see sources.tally_row).
     """
-    found, by_key, archive_copies = [], {}, {}
+    by_key, archive_copies = {}, {}
 
     def keep(link):
         # Links are compared without "http://" or "https://": the Internet Archive often knows a file
@@ -152,7 +192,6 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
         key = links.link_key(link)
         if key not in by_key:
             by_key[key] = link
-            found.append(link)
         return by_key[key]
 
     archive_entries, archive_remark, archive_asked = [], "", False
@@ -222,30 +261,42 @@ def find_files(domain, file_types, http_sources, browser_engines, user_agent=Non
                 keep(link)
     except KeyboardInterrupt:
         interrupted = True
-        log()
-        log("[!] Interrupted: the search stops here. What was found so far is kept.")
 
-    # The Archive's files are added last, so that for a file both know the search engine's current
-    # address is the one kept. Either way the Archive's copy is remembered for it.
-    for entry in archive_entries:
-        kept = keep(entry.link)
-        from_archive.add(kept)
-        archive_copies.setdefault(kept, entry.archive_copy)
+    # What follows only puts together what was found, and Ctrl+C must not cost that. It is no longer
+    # listened to; one that still arrives (it was typed an instant ago) is taken as said: the search
+    # counts as interrupted, and these lines, which can be run any number of times, are run again.
+    told = False
+    while True:
+        try:
+            ctrl_c.unheard()
+            if interrupted and not told:
+                told = True
+                log()
+                log("[!] Interrupted: the search stops here. What was found so far is kept.")
 
-    # Every source is counted by the different files it gave. A source that was not asked to the end
-    # (left out, or cut short by Ctrl+C) is marked as such, and so is one that left requests unanswered.
-    tallies = []
-    if "archive" in http_sources:
-        tallies.append(sources.tally_row(SOURCE_NAMES["archive"], len(from_archive), not archive_asked, archive_remark))
-    for name, links_found in (("bing", from_bing), ("duckduckgo", from_duckduckgo)):
-        if name in asked:
-            stopped = name in left_out or len(unanswered[name]) < len(file_types)
-            tallies.append(sources.tally_row(SOURCE_NAMES[name], len(links_found), stopped, unanswered=unanswered[name]))
-    if browser_engines and not browser_tallies:
-        # The search was cut short before the browser search had begun
-        browser_tallies = [sources.tally_row(SOURCE_NAMES[name] + " (browser)", 0, True) for name in browser_engines]
-    tallies.extend(browser_tallies)
-    return sorted(found), archive_copies, interrupted, tallies
+            # The Archive's files are added last, so that for a file both know the search engine's
+            # current address is the one kept. Either way the Archive's copy is remembered for it.
+            for entry in archive_entries:
+                kept = keep(entry.link)
+                from_archive.add(kept)
+                archive_copies.setdefault(kept, entry.archive_copy)
+
+            # Every source is counted by the different files it gave. A source that was not asked to
+            # the end (left out, or cut short by Ctrl+C) is marked as such, and so is one that left
+            # requests unanswered.
+            tallies = []
+            if "archive" in http_sources:
+                tallies.append(sources.tally_row(SOURCE_NAMES["archive"], len(from_archive), not archive_asked, archive_remark))
+            for name, links_found in (("bing", from_bing), ("duckduckgo", from_duckduckgo)):
+                if name in asked:
+                    stopped = name in left_out or len(unanswered[name]) < len(file_types)
+                    tallies.append(sources.tally_row(SOURCE_NAMES[name], len(links_found), stopped, unanswered=unanswered[name]))
+            if browser_engines and not browser_tallies:
+                # The search was cut short before the browser search had begun
+                browser_tallies = [sources.tally_row(SOURCE_NAMES[name] + " (browser)", 0, True) for name in browser_engines]
+            return sorted(by_key.values()), archive_copies, interrupted, tallies + browser_tallies
+        except KeyboardInterrupt:
+            interrupted = True
 
 
 def download_files(file_links, output_dir, user_agent=None, archive_copies=None, file_types=None):
@@ -311,6 +362,8 @@ def download_files(file_links, output_dir, user_agent=None, archive_copies=None,
                 downloaded += 1
     except KeyboardInterrupt:
         interrupted = True
+        # The run only has to end now, and say what it did
+        ctrl_c.unheard()
         log()
         log("[!] Interrupted: the downloads stop here. What was downloaded so far is kept.")
     log("%s Downloaded %s to %s (%d failed)." % ("[+]" if downloaded else "[-]", counted(downloaded), os.path.abspath(output_dir), failed))
@@ -409,22 +462,27 @@ def store_links(list_out, file_links, interrupted, summary):
     """What a search does with the links it found, so that they outlast the run: they are written to
     the file that was asked for with --list-out. If that fails they are printed instead, and so they
     are after an interrupted search without such a file, which ends the run. Adds the row for the link
-    list to summary. Returns False if a list that was asked for could not be written."""
+    list to summary. Returns False if a list that was asked for could not be written.
+
+    The list is written with Ctrl+C unheard, as find_files left it. Printing thousands of links takes
+    a while and can be cut short: for that Ctrl+C is listened to again."""
     if list_out and file_links:
         problem = write_link_list(list_out, file_links)
         if problem is not None:
             # The row comes first: printing thousands of links takes a while, and Ctrl+C may end it
             summary.append(("Link list", "could not be written"))
             log("[!] The links could not be written to %s (%s). They are listed here instead:" % (list_out, problem))
+            ctrl_c.heard()
             for link in file_links:
                 log("    " + link)
             return False
-        log("[+] The links were written to %s" % list_out)
         summary.append(("Link list", list_out))
+        log("[+] The links were written to %s" % list_out)
         if interrupted:
             log("[*] To download these files later, run again with: --list-in \"%s\"" % list_out)
     elif interrupted and file_links:
         log("[*] The links found so far (use --list-out FILE to have them written to a file):")
+        ctrl_c.heard()
         for link in file_links:
             log("    " + link)
     return True
@@ -475,9 +533,13 @@ def build_parser():
     return parser
 
 
-def main(argv=None):
+def main(argv=None, then_exit=False):
     """Run the command line. Returns the exit code: 0, 1 if something asked for could not be done,
-    130 after Ctrl+C."""
+    130 after Ctrl+C.
+
+    then_exit says that the process ends when this returns, which is how "python -m justosint" calls
+    it. Ctrl+C is then not listened to again once the run is over: in the instant it takes Python to
+    end it would stop nothing, and could only put Python's own words under the summary."""
     # Metadata can hold characters the console cannot show (a Windows console often knows one code page
     # only). Show a "?" for those instead of stopping with an error.
     for stream in (sys.stdout, sys.stderr):
@@ -488,11 +550,16 @@ def main(argv=None):
     try:
         return _run(argv)
     except KeyboardInterrupt:
-        # Ctrl+C before there is anything to sum up, in the instant between the end of the search and
-        # what follows it, or once more while the summary is being printed
+        # Ctrl+C before there is anything to sum up (or a second one within an instant of the first, at
+        # the very moment the first is being dealt with)
         log()
         log("[!] Interrupted.")
         return 130
+    finally:
+        if then_exit:
+            ctrl_c.unheard()
+        else:
+            ctrl_c.heard()
 
 
 def _run(argv):
@@ -533,7 +600,10 @@ def _run(argv):
     summary = []
 
     def finish(status):
-        # Every run that searched, or read a list of links, ends with the summary
+        # Every run that searched, or read a list of links, ends with the summary. Nothing is left by
+        # then that Ctrl+C could stop, so it is not listened to while the summary is put together
+        # (thousands of links take a moment to count) and printed.
+        ctrl_c.unheard()
         log()
         log_summary(subject, summary, files_by_type(file_links, file_types), tallies, len(file_links))
         return status
@@ -591,9 +661,16 @@ def _run(argv):
     try:
         if searched:
             list_written = store_links(args.list_out, file_links, interrupted, summary)
-        # An interrupted search ends the run: nothing is downloaded
-        status = 130 if interrupted else _download_and_extract(args, file_links, archive_copies, file_types, listed, summary)
+        if interrupted:
+            # An interrupted search ends the run: nothing is downloaded
+            status = 130
+        else:
+            # What was found is stored. The questions, the downloads and the metadata can be cut short.
+            ctrl_c.heard()
+            status = _download_and_extract(args, file_links, archive_copies, file_types, listed, summary)
     except KeyboardInterrupt:
+        # The run only has to end now, and say what it did
+        ctrl_c.unheard()
         log()
         log("[!] Interrupted.")
         status = 130
@@ -646,6 +723,7 @@ def _download_and_extract(args, file_links, archive_copies, file_types, listed, 
         try:
             worked, extracted = extract_metadata(output_dir, args.csv or None)
         except KeyboardInterrupt:
+            ctrl_c.unheard()
             summary.append(("Metadata", "interrupted"))
             raise
         if not worked:
