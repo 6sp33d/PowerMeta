@@ -40,13 +40,16 @@ class _CtrlC:
     A terminal does something of its own when Ctrl+C is typed, whatever the program makes of it: it
     throws away the output that is still on its way to the screen. Lines printed an instant before,
     the summary among them, would never be seen. While Ctrl+C is unheard, the terminal is told to
-    keep its output.
+    keep its output. When the program ends the terminal is put back as it was - after an interrupted
+    run (see linger) only a moment later, because that is when a second Ctrl+C comes, and a slow
+    screen may still be drawing the summary.
     """
 
     def __init__(self):
         self._listened = None  # what listened to Ctrl+C before it was turned away
         self._terminal = None  # the terminal that was told to keep its output
         self._at_exit = False  # whether the terminal is seen to when the program ends
+        self.linger = 0.0  # seconds the terminal keeps its output after the program has ended
 
     def unheard(self):
         """From now on Ctrl+C does nothing. If it was typed an instant ago and has not yet had its
@@ -91,7 +94,7 @@ class _CtrlC:
                 if not self._at_exit:
                     # The terminal is not left changed when the program ends
                     self._at_exit = True
-                    atexit.register(self._terminal_keeps_output, False)
+                    atexit.register(self._at_the_end)
             elif not keep and self._terminal is not None:
                 fd, self._terminal = self._terminal, None
                 settings = termios.tcgetattr(fd)
@@ -106,6 +109,18 @@ class _CtrlC:
         except (AttributeError, OSError, ValueError, termios.error):
             pass  # no terminal, or one that cannot be asked: nothing is changed
 
+    def _at_the_end(self):
+        # A terminal cannot be asked whether the screen has taken what was printed, so it is given a
+        # moment. Ctrl+C is not listened to meanwhile.
+        if self._terminal is not None and self.linger > 0:
+            time.sleep(self.linger)
+        self._terminal_keeps_output(False)
+
+    @property
+    def listened_to(self):
+        """Whether Ctrl+C is listened to now, as far as this switch goes."""
+        return self._listened is None
+
 
 ctrl_c = _CtrlC()
 
@@ -113,7 +128,27 @@ ctrl_c = _CtrlC()
 def log(message=""):
     # Much of what is printed comes from outside: addresses, metadata, the error text of a server.
     # None of it may steer the terminal, so control characters are shown as "?".
-    print(_UNPRINTABLE.sub("?", str(message)), flush=True)
+    try:
+        print(_UNPRINTABLE.sub("?", str(message)), flush=True)
+    except BrokenPipeError:
+        _output_gone()
+
+
+def _output_gone():
+    """The program that read the output has ended: "| tee run.log", which Ctrl+C ends as well, or
+    "| head". Nothing more can be shown, but the run must not end in an error and lose what it found.
+    From now on the output goes nowhere, and the run stops as after Ctrl+C - unless Ctrl+C is not
+    listened to at the moment: then it simply goes on to what it was about to do."""
+    try:
+        nowhere = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(nowhere, sys.stdout.fileno())
+        finally:
+            os.close(nowhere)
+    except (AttributeError, OSError, ValueError):
+        pass
+    if ctrl_c.listened_to:
+        raise KeyboardInterrupt
 
 
 def counted(count, noun="file", verb=False):
@@ -195,6 +230,9 @@ def ask_yes_no(question):
             answer = input("[?] " + question + " [Y/n] ").strip().lower()
         except EOFError:
             return False
+        except BrokenPipeError:
+            _output_gone()
+            return False
         if answer in ("", "y", "yes"):
             return True
         if answer in ("n", "no"):
@@ -207,7 +245,11 @@ def ask_person(question):
     if sys.stdin is None or not sys.stdin.isatty():
         log("%sNot asked, because there is no terminal." % question)
         raise EOFError
-    return input(question)
+    try:
+        return input(question)
+    except BrokenPipeError:
+        _output_gone()
+        raise EOFError
 
 
 def _name_list(text, allowed, option, parser):
@@ -598,19 +640,24 @@ def main(argv=None, then_exit=False):
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError):
             pass
+    status = None
     try:
-        return _run(argv)
+        status = _run(argv)
     except KeyboardInterrupt:
         # Ctrl+C before there is anything to sum up (or a second one within an instant of the first, at
         # the very moment the first is being dealt with)
         log()
         log("[!] Interrupted.")
-        return 130
+        status = 130
     finally:
         if then_exit:
             ctrl_c.unheard()
+            if status == 130:
+                # A second Ctrl+C follows the first closely: give a slow screen time to draw the summary
+                ctrl_c.linger = 0.5
         else:
             ctrl_c.heard()
+    return status
 
 
 def _run(argv):
