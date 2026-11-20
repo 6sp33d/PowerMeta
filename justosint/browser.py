@@ -467,7 +467,9 @@ class Session:
     def second_look(self, engine, url):
         """Called when nothing could be read from the first page of a search. A check this program does
         not recognise would look just like an empty page, so the person gets one chance per search engine
-        to look at the window. Returns True if the page should be read again."""
+        to look at the window. Returns True if the page should be read again, and None if the window was
+        left somewhere else and the search could not be shown again (that has been said): then nothing
+        in the window is a page of the search engine."""
         if engine in self._asked_about_empty_page or engine in self.skipped or self.gone:
             return False
         self._asked_about_empty_page.add(engine)
@@ -480,7 +482,9 @@ class Session:
         # With nobody there to look, the page is taken for what it most likely is: one without results
         if not self._wait_for_person(engine, question, unattended=""):
             return False
-        return self._back_to(engine, url)
+        if self._back_to(engine, url):
+            return True
+        return None if not self.gone and engine not in self.skipped else False
 
     def _back_to(self, engine, url, in_the_way=None):
         """After the person has dealt with a check the browser normally lands back on the results.
@@ -974,8 +978,13 @@ def search_google(session, domain, file_type, max_pages=5, delay=2):
                     gap = _not_shown(session, "google", page_number)
                     break
                 addresses, hidden = read()
-            elif page_number == 1 and session.second_look("google", url):
-                addresses, hidden = read()
+            elif page_number == 1:
+                looked = session.second_look("google", url)
+                if looked is None:
+                    gap = _not_shown(session, "google", page_number)
+                    break
+                if looked:
+                    addresses, hidden = read()
         new, _ = _keep(session, "google", addresses, domain, file_type, found)
 
         # Google's result links do not show where they lead: each result is clicked to find out
@@ -1040,9 +1049,10 @@ def bing_knows_site(session, domain):
         if not session.gone and "bing" not in session.skipped:
             log("[!] Bing is left out for this run.")
         return False
-    results = links.count_bing_results(session.source())
-    if results == 0 and session.second_look("bing", url):
-        results = links.count_bing_results(session.source())
+    if links.count_bing_results(session.source()) == 0 and session.second_look("bing", url) is None:
+        # Its page could not be shown again, and that has been said
+        log("[!] Bing is left out for this run.")
+        return False
     if session.gone or "bing" in session.skipped:
         return False
     results, on_domain, keeps_to_site = links.bing_keeps_to_site(session.source(), domain)
@@ -1098,11 +1108,13 @@ def search_duckduckgo(session, domain, file_type, max_pages=5, delay=2):
 
     log("[*] Searching DuckDuckGo for '%s' in the browser" % query)
     url = DUCKDUCKGO_URL + "?" + urllib.parse.urlencode({"q": query})
-    if not session.show("duckduckgo", url):
+    shown = session.show("duckduckgo", url)
+    if shown and links.count_duckduckgo_results(session.source()) == 0:
+        # A second look that ends without a page of DuckDuckGo leaves nothing to read
+        shown = session.second_look("duckduckgo", url) is not None
+    if not shown:
         gap = _not_shown(session, "duckduckgo", 1)
     else:
-        if links.count_duckduckgo_results(session.source()) == 0:
-            session.second_look("duckduckgo", url)
         for page_number in range(1, max_pages + 1):
             if session.gone or "duckduckgo" in session.skipped:
                 break
