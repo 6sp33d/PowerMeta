@@ -50,6 +50,7 @@ class _CtrlC:
         self._terminal = None  # the terminal that was told to keep its output
         self._at_exit = False  # whether the terminal is seen to when the program ends
         self.linger = 0.0  # seconds the terminal keeps its output after the program has ended
+        self.output_gone = False  # the program that read the output has ended (see _output_gone)
 
     def unheard(self):
         """From now on Ctrl+C does nothing. If it was typed an instant ago and has not yet had its
@@ -137,8 +138,10 @@ def log(message=""):
 def _output_gone():
     """The program that read the output has ended: "| tee run.log", which Ctrl+C ends as well, or
     "| head". Nothing more can be shown, but the run must not end in an error and lose what it found.
-    From now on the output goes nowhere, and the run stops as after Ctrl+C - unless Ctrl+C is not
-    listened to at the moment: then it simply goes on to what it was about to do."""
+    From now on the output goes nowhere, and the run stops as after Ctrl+C. While Ctrl+C is not
+    listened to, the run finishes what it is doing (storing what was found, the summary) and stops at
+    the next step that could be cut short, before a question nobody would see."""
+    ctrl_c.output_gone = True
     try:
         nowhere = os.open(os.devnull, os.O_WRONLY)
         try:
@@ -641,14 +644,16 @@ def main(argv=None, then_exit=False):
         except (AttributeError, ValueError):
             pass
     status = None
+    ctrl_c.output_gone = False
     try:
         status = _run(argv)
     except KeyboardInterrupt:
         # Ctrl+C before there is anything to sum up (or a second one within an instant of the first, at
-        # the very moment the first is being dealt with)
+        # the very moment the first is being dealt with). The run only has to end now.
+        status = 130
+        ctrl_c.unheard()
         log()
         log("[!] Interrupted.")
-        status = 130
     finally:
         if then_exit:
             ctrl_c.unheard()
@@ -763,7 +768,10 @@ def _run(argv):
             # An interrupted search ends the run: nothing is downloaded
             status = 130
         else:
-            # What was found is stored. The questions, the downloads and the metadata can be cut short.
+            # What was found is stored. The questions, the downloads and the metadata can be cut short -
+            # unless the output went away meanwhile: then the run stops here, as after Ctrl+C.
+            if ctrl_c.output_gone:
+                raise KeyboardInterrupt
             ctrl_c.heard()
             status = _download_and_extract(args, file_links, archive_copies, file_types, listed, summary)
     except KeyboardInterrupt:
