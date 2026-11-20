@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import datetime
 import os
 import re
@@ -10,6 +11,11 @@ import signal
 import subprocess
 import sys
 import time
+
+try:
+    import termios
+except ImportError:  # Windows has no such thing, and no need of it
+    termios = None
 
 from . import BANNER, NAME, __version__, exif, links, sources
 from .web import DEFAULT_USER_AGENT, PROGRAM_USER_AGENT, FetchError, Fetcher, SaveError, download
@@ -30,10 +36,17 @@ class _CtrlC:
     search found is put together and stored, nor from the summary on. There Ctrl+C would stop
     nothing that takes long - it could only cost what the run was for. A second Ctrl+C typed right
     after the first is what lands in those moments, and with thousands of files they are not short.
+
+    A terminal does something of its own when Ctrl+C is typed, whatever the program makes of it: it
+    throws away the output that is still on its way to the screen. Lines printed an instant before,
+    the summary among them, would never be seen. While Ctrl+C is unheard, the terminal is told to
+    keep its output.
     """
 
     def __init__(self):
         self._listened = None  # what listened to Ctrl+C before it was turned away
+        self._terminal = None  # the terminal that was told to keep its output
+        self._at_exit = False  # whether the terminal is seen to when the program ends
 
     def unheard(self):
         """From now on Ctrl+C does nothing. If it was typed an instant ago and has not yet had its
@@ -48,12 +61,50 @@ class _CtrlC:
         except ValueError:
             return  # not the main thread, which is the only one Ctrl+C reaches
         self._listened = listened
+        self._terminal_keeps_output(True)
 
     def heard(self):
         """From now on Ctrl+C is listened to again, as it was before."""
         if self._listened is not None:
+            self._terminal_keeps_output(False)
             listened, self._listened = self._listened, None
             signal.signal(signal.SIGINT, listened)
+
+    def _terminal_keeps_output(self, keep):
+        """Tell the terminal the output goes to not to throw output away when Ctrl+C is typed (its
+        setting NOFLSH), or to do so again. Only a setting this program changed is changed back, and
+        where there is no such terminal nothing happens."""
+        if termios is None:
+            return
+        try:
+            if keep and self._terminal is None:
+                fd = sys.stdout.fileno()
+                # Only the program in the foreground of a terminal has a say in its settings
+                if not os.isatty(fd) or os.tcgetpgrp(fd) != os.getpgrp():
+                    return
+                settings = termios.tcgetattr(fd)
+                if settings[3] & termios.NOFLSH:
+                    return  # it keeps its output already, and that is not this program's to undo
+                settings[3] |= termios.NOFLSH
+                termios.tcsetattr(fd, termios.TCSANOW, settings)
+                self._terminal = fd
+                if not self._at_exit:
+                    # The terminal is not left changed when the program ends
+                    self._at_exit = True
+                    atexit.register(self._terminal_keeps_output, False)
+            elif not keep and self._terminal is not None:
+                fd, self._terminal = self._terminal, None
+                settings = termios.tcgetattr(fd)
+                settings[3] &= ~termios.NOFLSH
+                # A program that has been put in the background meanwhile would be stopped for changing
+                # the terminal. With that signal held back it is not: what it changed, it changes back.
+                blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
+                try:
+                    termios.tcsetattr(fd, termios.TCSANOW, settings)
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+        except (AttributeError, OSError, ValueError, termios.error):
+            pass  # no terminal, or one that cannot be asked: nothing is changed
 
 
 ctrl_c = _CtrlC()
